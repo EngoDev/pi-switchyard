@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-import { getMessageText, toOriginContextItem } from "./threads.js";
-import type { OriginContextItem, TaggedAgentMessage } from "./types.js";
+import { getMessageText, getRouterMetadata, toOriginContextItem } from "./threads.js";
+import type { OriginContextItem } from "./types.js";
 
 export const ORIGIN_CONTEXT_ROLES = ["user", "assistant", "toolResult", "custom"] as const;
 export type OriginContextRole = (typeof ORIGIN_CONTEXT_ROLES)[number];
@@ -26,7 +26,7 @@ export function selectOriginContext(
   if (!params.includeToolResults) roles.delete("toolResult");
   const query = params.query?.trim().toLowerCase();
   let items = messages
-    .filter((message) => !(message as TaggedAgentMessage).jevRouter)
+    .filter((message) => !getRouterMetadata(message))
     .filter((message) => roles.has(message.role as OriginContextRole))
     .filter((message) => !query || getMessageText(message).toLowerCase().includes(query))
     .map(toOriginContextItem)

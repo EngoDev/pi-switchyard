@@ -5,6 +5,7 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type {
   OriginContextItem,
+  RouterMessageMetadata,
   RouterSessionEntryData,
   TaggedAgentMessage,
   TempThread,
@@ -35,6 +36,18 @@ const STOP_WORDS = new Set([
   "you",
 ]);
 
+export function getRouterMetadata(message: AgentMessage): RouterMessageMetadata | undefined {
+  const topLevel = (message as TaggedAgentMessage).jevRouter;
+  if (topLevel) return topLevel;
+  if (message.role !== "custom" || !message.details || typeof message.details !== "object") return undefined;
+  const nested = (message.details as Record<string, unknown>).jevRouter;
+  if (!nested || typeof nested !== "object") return undefined;
+  const candidate = nested as Record<string, unknown>;
+  return typeof candidate.threadId === "string" && typeof candidate.threadName === "string"
+    ? { threadId: candidate.threadId, threadName: candidate.threadName }
+    : undefined;
+}
+
 export function getMessageText(message: AgentMessage): string {
   if (!("content" in message)) return "";
   if (typeof message.content === "string") return message.content.trim();
@@ -60,7 +73,7 @@ export function toOriginContextItem(message: AgentMessage): OriginContextItem | 
 
 export function getOriginContext(messages: readonly AgentMessage[], limit: number): OriginContextItem[] {
   return messages
-    .filter((message) => !(message as TaggedAgentMessage).jevRouter)
+    .filter((message) => !getRouterMetadata(message))
     .filter((message) => message.role === "user" || message.role === "assistant")
     .map(toOriginContextItem)
     .filter((item): item is OriginContextItem => item !== undefined)
@@ -146,8 +159,7 @@ export function restoreThreads(entries: readonly SessionEntry[]): Map<string, Te
   }
   for (const entry of entries) {
     if (entry.type !== "message") continue;
-    const tagged = entry.message as TaggedAgentMessage;
-    const threadId = tagged.jevRouter?.threadId;
+    const threadId = getRouterMetadata(entry.message)?.threadId;
     if (!threadId) continue;
     const thread = threads.get(threadId);
     if (thread) updateThreadFromMessage(thread, entry.message);
@@ -168,7 +180,7 @@ export function filterMessagesForThread(
   thread: TempThread,
 ): AgentMessage[] {
   const threadMessages = messages.filter(
-    (message) => (message as TaggedAgentMessage).jevRouter?.threadId === thread.id,
+    (message) => getRouterMetadata(message)?.threadId === thread.id,
   );
   const seedMessage: AgentMessage = {
     role: "user",
@@ -179,7 +191,48 @@ export function filterMessagesForThread(
 }
 
 export function filterMessagesForOrigin(messages: readonly AgentMessage[]): AgentMessage[] {
-  return messages.filter((message) => !(message as TaggedAgentMessage).jevRouter);
+  return messages.filter((message) => !getRouterMetadata(message));
+}
+
+function isReplayableThreadMessage(message: AgentMessage): boolean {
+  return message.role !== "assistant"
+    || (message.stopReason !== "error" && message.stopReason !== "aborted" && message.stopReason !== "length");
+}
+
+export function threadContextFromEntries(
+  entries: readonly SessionEntry[],
+  thread: TempThread,
+): AgentMessage[] {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type !== "compaction" || !entry.details || typeof entry.details !== "object") continue;
+    const router = (entry.details as Record<string, unknown>).jevRouter;
+    if (!router || typeof router !== "object") continue;
+    const tempThreads = (router as Record<string, unknown>).tempThreads;
+    if (!tempThreads || typeof tempThreads !== "object") continue;
+    const record = (tempThreads as Record<string, unknown>)[thread.id];
+    if (!record || typeof record !== "object") continue;
+    const summary = (record as Record<string, unknown>).summary;
+    const firstKeptEntryId = (record as Record<string, unknown>).firstKeptEntryId;
+    if (typeof summary !== "string" || typeof firstKeptEntryId !== "string") continue;
+
+    const boundaryIndex = entries.findIndex((candidate) => candidate.id === firstKeptEntryId);
+    const tailEntries = entries.slice(boundaryIndex >= 0 ? boundaryIndex : index + 1);
+    const tailMessages = messagesFromEntries(tailEntries)
+      .filter((message) => getRouterMetadata(message)?.threadId === thread.id)
+      .filter(isReplayableThreadMessage);
+    const context = filterMessagesForThread(tailMessages, thread);
+    context.splice(1, 0, {
+      role: "user",
+      content: [{ type: "text", text: `Previous summary for temp thread ${thread.name}:\n\n${summary}` }],
+      timestamp: new Date(entry.timestamp).getTime(),
+    });
+    return context;
+  }
+
+  const messages = messagesFromEntries(entries)
+    .filter(isReplayableThreadMessage);
+  return filterMessagesForThread(messages, thread);
 }
 
 export function findMissingTempLabels(
@@ -192,7 +245,7 @@ export function findMissingTempLabels(
       entry.type !== "message"
       || (entry.message.role !== "user" && entry.message.role !== "assistant")
     ) continue;
-    const metadata = (entry.message as TaggedAgentMessage).jevRouter;
+    const metadata = getRouterMetadata(entry.message);
     if (!metadata || getLabel(entry.id)) continue;
     missing.push({ entryId: entry.id, label: `temp:${metadata.threadName}` });
   }

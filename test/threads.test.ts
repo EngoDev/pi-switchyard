@@ -10,6 +10,7 @@ import {
   getOriginContext,
   makeThreadName,
   messagesFromEntries,
+  threadContextFromEntries,
 } from "../src/threads.js";
 import type { TaggedAgentMessage, TempThread } from "../src/types.js";
 
@@ -66,6 +67,112 @@ test("temp context contains a seed snapshot and only its own messages", () => {
   assert.deepEqual(filtered.slice(1).map((message) => message.timestamp), [2, 3]);
 });
 
+test("temp history remains recoverable from the full branch after origin compaction", () => {
+  const thread: TempThread = {
+    id: "t1",
+    name: "pr-check",
+    createdAt: new Date(1).toISOString(),
+    updatedAt: new Date(1).toISOString(),
+    firstPrompt: "Did you create a PR?",
+    seedContext: [],
+  };
+  const tempMessage = {
+    type: "message" as const,
+    id: "temp-user",
+    parentId: null,
+    timestamp: new Date(2).toISOString(),
+    message: user("old temp message", 2, "t1"),
+  };
+  const compaction = {
+    type: "compaction" as const,
+    id: "compact",
+    parentId: "temp-user",
+    timestamp: new Date(3).toISOString(),
+    summary: "origin-only summary",
+    firstKeptEntryId: "temp-user",
+    tokensBefore: 100,
+  };
+  const context = threadContextFromEntries([tempMessage, compaction], thread);
+  assert.match(JSON.stringify(context), /old temp message/);
+});
+
+test("temp compaction summary replaces old temp messages and keeps retained tail", () => {
+  const thread: TempThread = {
+    id: "t1",
+    name: "pr-check",
+    createdAt: new Date(1).toISOString(),
+    updatedAt: new Date(1).toISOString(),
+    firstPrompt: "Did you create a PR?",
+    seedContext: [],
+  };
+  const entries = [
+    {
+      type: "message" as const,
+      id: "old-temp",
+      parentId: null,
+      timestamp: new Date(1).toISOString(),
+      message: user("summarized old temp", 1, "t1"),
+    },
+    {
+      type: "message" as const,
+      id: "kept-origin",
+      parentId: "old-temp",
+      timestamp: new Date(2).toISOString(),
+      message: user("origin boundary", 2),
+    },
+    {
+      type: "message" as const,
+      id: "kept-temp",
+      parentId: "kept-origin",
+      timestamp: new Date(3).toISOString(),
+      message: user("retained temp", 3, "t1"),
+    },
+    {
+      type: "compaction" as const,
+      id: "compact",
+      parentId: "kept-temp",
+      timestamp: new Date(4).toISOString(),
+      summary: "origin summary",
+      firstKeptEntryId: "kept-origin",
+      tokensBefore: 100,
+      details: {
+        readFiles: [],
+        modifiedFiles: [],
+        jevRouter: {
+          threadAware: true,
+          tempThreads: {
+            t1: {
+              threadName: "pr-check",
+              summary: "temp summary",
+              firstKeptEntryId: "kept-origin",
+            },
+          },
+        },
+      },
+    },
+    {
+      type: "message" as const,
+      id: "failed-temp",
+      parentId: "compact",
+      timestamp: new Date(5).toISOString(),
+      message: { ...assistant("overflow failure", 5, "t1"), stopReason: "error" as const },
+    },
+    {
+      type: "message" as const,
+      id: "post-temp",
+      parentId: "failed-temp",
+      timestamp: new Date(6).toISOString(),
+      message: user("post-compaction temp", 6, "t1"),
+    },
+  ];
+  const context = threadContextFromEntries(entries, thread);
+  const serialized = JSON.stringify(context);
+  assert.match(serialized, /temp summary/);
+  assert.match(serialized, /retained temp/);
+  assert.match(serialized, /post-compaction temp/);
+  assert.doesNotMatch(serialized, /summarized old temp|overflow failure/);
+});
+
 test("finds temp prompts and answers that need visible tree labels", () => {
   const userEntry = {
     type: "message" as const,
@@ -100,6 +207,7 @@ test("custom-message temp metadata is restored from persisted details", () => {
     details: { jevRouter: { threadId: "t1", threadName: "temp" } },
   }]);
   assert.equal((messages[0] as TaggedAgentMessage | undefined)?.jevRouter?.threadId, "t1");
+  assert.deepEqual(filterMessagesForOrigin(messages), []);
 });
 
 test("thread names are readable and unique", () => {

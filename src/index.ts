@@ -1,11 +1,13 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai";
+import { StringEnum, uuidv7 } from "@earendil-works/pi-ai";
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import {
+  convertToLlm,
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
+  serializeConversation,
   truncateHead,
   type ExtensionAPI,
   type ExtensionContext,
@@ -14,6 +16,16 @@ import {
 import { Type } from "typebox";
 
 import { resolveTypeSafeApiKey } from "./auth.js";
+import {
+  collectOriginFileLists,
+  collectTempCompactionInput,
+  COMPACTION_FILES_ENTRY_TYPE,
+  compactOriginThread,
+  compactTempThread,
+  findPreviousOriginFileLists,
+  type OriginSummaryRequest,
+  type OriginSummaryResult,
+} from "./compaction.js";
 import { isConfigured, loadConfig } from "./config.js";
 import { registerConfigurationCommand } from "./configuration-ui.js";
 import { decideRoute, type RouteClient } from "./router.js";
@@ -25,11 +37,11 @@ import {
 import {
   createTempThread,
   filterMessagesForOrigin,
-  filterMessagesForThread,
   findMissingTempLabels,
   getOriginContext,
   messagesFromEntries,
   restoreThreads,
+  threadContextFromEntries,
   updateThreadFromMessage,
 } from "./threads.js";
 import type {
@@ -111,6 +123,79 @@ function getSessionMessages(ctx: ExtensionContext): AgentMessage[] {
   return messagesFromEntries(ctx.sessionManager.getBranch());
 }
 
+function mergeUsage(first: Usage | undefined, second: Usage | undefined): Usage | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  return {
+    input: first.input + second.input,
+    output: first.output + second.output,
+    cacheRead: first.cacheRead + second.cacheRead,
+    cacheWrite: first.cacheWrite + second.cacheWrite,
+    ...((first.cacheWrite1h !== undefined || second.cacheWrite1h !== undefined)
+      ? { cacheWrite1h: (first.cacheWrite1h ?? 0) + (second.cacheWrite1h ?? 0) }
+      : {}),
+    ...((first.reasoning !== undefined || second.reasoning !== undefined)
+      ? { reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0) }
+      : {}),
+    totalTokens: first.totalTokens + second.totalTokens,
+    cost: {
+      input: first.cost.input + second.cost.input,
+      output: first.cost.output + second.cost.output,
+      cacheRead: first.cost.cacheRead + second.cost.cacheRead,
+      cacheWrite: first.cost.cacheWrite + second.cost.cacheWrite,
+      total: first.cost.total + second.cost.total,
+    },
+  };
+}
+
+async function summarizeThreadWithPi(
+  request: OriginSummaryRequest,
+  ctx: ExtensionContext,
+  signal: AbortSignal,
+): Promise<OriginSummaryResult> {
+  if (!ctx.model) throw new Error("No model is available for origin-only compaction");
+  const conversation = serializeConversation(convertToLlm(request.messages));
+  const previousLabel = request.scope.kind === "origin" ? "Previous origin summary" : "Previous temp-thread summary";
+  const previous = request.previousSummary
+    ? `\n\n## ${previousLabel}\n${request.previousSummary}`
+    : "";
+  const custom = request.customInstructions
+    ? `\n\n## User focus instructions\n${request.customInstructions}`
+    : "";
+  const scopeName = request.scope.kind === "origin"
+    ? "origin conversation"
+    : `temp thread ${request.scope.threadName}`;
+  const prompt = `Create a structured continuation summary for the ${scopeName} only.
+
+Capture its goal, constraints, progress, decisions, files, blockers, and next steps. Do not continue the conversation. Messages from other logical threads have already been removed; do not infer or add unrelated work.${previous}${custom}
+
+<thread-conversation>\n${conversation}\n</thread-conversation>`;
+  const response = await ctx.modelRegistry.complete(
+    ctx.model,
+    {
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: prompt }],
+        timestamp: Date.now(),
+      }],
+    },
+    {
+      maxTokens: Math.min(8192, ctx.model.maxTokens),
+      signal,
+      cacheRetention: "none",
+      sessionId: uuidv7(),
+    },
+  );
+  if (response.stopReason === "error" || response.stopReason === "aborted" || response.stopReason === "length") {
+    throw new Error(response.errorMessage ?? `Origin compaction stopped with ${response.stopReason}`);
+  }
+  const summary = response.content
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  return { summary, usage: response.usage };
+}
+
 export default function jevRouterExtension(pi: ExtensionAPI): void {
   let config: RouterConfig;
   let routeClient: RouteClient | undefined;
@@ -119,6 +204,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   let lastVisibleRoute: ActiveRoute | undefined;
   let pendingThreadCreated: TempThread | undefined;
   let pendingRoutePrompt: string | undefined;
+  let pendingCompactionFileLists: { readFiles: string[]; modifiedFiles: string[] } | undefined;
   let routeMetadataPersisted = false;
 
   function setOriginContextToolEnabled(enabled: boolean): void {
@@ -248,6 +334,101 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     else clearDebugStatus(ctx);
   });
 
+  pi.on("session_before_compact", async (event, ctx) => {
+    pendingCompactionFileLists = undefined;
+    const { preparation, branchEntries, customInstructions, signal } = event;
+    const previousFileLists = findPreviousOriginFileLists(branchEntries);
+    const outcome = await compactOriginThread(
+      {
+        messagesToSummarize: preparation.messagesToSummarize,
+        turnPrefixMessages: preparation.turnPrefixMessages,
+        previousSummary: preparation.previousSummary,
+        firstKeptEntryId: preparation.firstKeptEntryId,
+        tokensBefore: preparation.tokensBefore,
+        customInstructions,
+        ...(previousFileLists ? { previousFileLists } : {}),
+      },
+      (request) => summarizeThreadWithPi(request, ctx, signal),
+    );
+    if (outcome.action === "default") {
+      pendingCompactionFileLists = collectOriginFileLists(
+        [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+        previousFileLists,
+      );
+      return;
+    }
+    if (outcome.action === "cancel") {
+      if (!signal.aborted) {
+        ctx.ui.notify(`Origin-only compaction cancelled: ${outcome.reason}`, "error");
+      }
+      return { cancel: true };
+    }
+
+    const tempRoute = activeRoute && activeRoute.threadId !== "origin"
+      ? activeRoute
+      : lastVisibleRoute && lastVisibleRoute.threadId !== "origin"
+        ? lastVisibleRoute
+        : undefined;
+    if (tempRoute) {
+      const tempInput = collectTempCompactionInput(
+        branchEntries,
+        tempRoute.threadId,
+        preparation.firstKeptEntryId,
+      );
+      const tempOutcome = await compactTempThread(
+        {
+          threadId: tempRoute.threadId,
+          threadName: tempRoute.threadName,
+          messagesToSummarize: tempInput.messages,
+          turnPrefixMessages: [],
+          previousSummary: tempInput.previousSummary,
+          firstKeptEntryId: preparation.firstKeptEntryId,
+          customInstructions,
+        },
+        (request) => summarizeThreadWithPi(request, ctx, signal),
+      );
+      if (tempOutcome.action === "cancel") {
+        if (!signal.aborted) {
+          ctx.ui.notify(`Temp-thread compaction cancelled: ${tempOutcome.reason}`, "error");
+        }
+        return { cancel: true };
+      }
+      if (tempOutcome.action === "compact") {
+        const { usage, ...tempSummary } = tempOutcome.summary;
+        outcome.compaction.details.jevRouter.tempThreads = {
+          [tempRoute.threadId]: tempSummary,
+        };
+        const combinedUsage = mergeUsage(outcome.compaction.usage, usage);
+        if (combinedUsage) outcome.compaction.usage = combinedUsage;
+      }
+    }
+
+    pendingCompactionFileLists = {
+      readFiles: outcome.compaction.details.readFiles,
+      modifiedFiles: outcome.compaction.details.modifiedFiles,
+    };
+    if (config.debug) {
+      ctx.ui.notify(
+        `Origin-only compaction excluded ${outcome.compaction.details.jevRouter.excludedTempMessages} temp message(s)`,
+        "info",
+      );
+    }
+    return { compaction: outcome.compaction };
+  });
+
+  pi.on("session_compact", (event) => {
+    if (!pendingCompactionFileLists) return;
+    pi.appendEntry(COMPACTION_FILES_ENTRY_TYPE, {
+      compactionEntryId: event.compactionEntry.id,
+      ...pendingCompactionFileLists,
+    });
+    pendingCompactionFileLists = undefined;
+  });
+
+  pi.on("session_compact_failed", () => {
+    pendingCompactionFileLists = undefined;
+  });
+
   pi.on("before_agent_start", async (event, ctx) => {
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
@@ -365,14 +546,14 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     return { message: tagged };
   });
 
-  pi.on("context", (event) => {
+  pi.on("context", (event, ctx) => {
     if (!activeRoute) return;
     if (activeRoute.threadId === "origin") {
       return { messages: filterMessagesForOrigin(event.messages) };
     }
     const thread = threads.get(activeRoute.threadId);
     if (!thread) return;
-    return { messages: filterMessagesForThread(event.messages, thread) };
+    return { messages: threadContextFromEntries(ctx.sessionManager.getBranch(), thread) };
   });
 
   pi.on("message_start", (event, ctx) => {

@@ -121,6 +121,17 @@ pnpm evaluate:live  # uses the configured TypeSafe key and consumes API usage
 
 Source control is managed with Jujutsu (`jj`).
 
-## Current limitation
+## Thread-aware compaction
 
-Logical thread metadata lives on individual messages. Manual compaction of a mixed origin/temp transcript is not yet thread-aware and may reduce the recoverable history of older temp threads. Normal provider context growth is bounded by the router, so automatic compaction should be uncommon.
+The extension intercepts manual and automatic compaction when the summarized span contains temp-thread messages:
+
+- Origin-only sessions delegate to Pi's default compaction unchanged.
+- Mixed spans generate an origin summary from origin messages only, including split-turn prefixes.
+- Active temp threads receive a separate summary stored in compaction metadata; it is used only when that temp thread resumes.
+- Retained temp messages after the compaction boundary remain available to their temp thread.
+- Origin file tracking is preserved deterministically without including temp-only file operations.
+- If origin or active-temp summarization fails, compaction is cancelled rather than falling back to a mixed summary.
+
+Compaction remains logical: old temp entries stay in the session JSONL for recovery and `/tree`, but they are not included in the origin summary or origin provider context.
+
+`/tree` branch summaries are not yet thread-aware; avoid requesting a branch summary when navigating away from a branch containing mixed origin/temp work.
