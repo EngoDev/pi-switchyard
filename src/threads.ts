@@ -184,7 +184,7 @@ export function findLastRouteForThread(
   return findRouteHistoryForThread(entries, threadId).at(-1);
 }
 
-function summaryAffectsThread(entry: SessionEntry, threadId: string): boolean {
+export function summaryAffectsThread(entry: SessionEntry, threadId: string): boolean {
   if (entry.type === "branch_summary") return threadId === "origin";
   if (entry.type !== "compaction") return false;
   if (threadId === "origin") return true;
@@ -194,28 +194,6 @@ function summaryAffectsThread(entry: SessionEntry, threadId: string): boolean {
   if (!router || typeof router !== "object") return false;
   const tempThreads = (router as Record<string, unknown>).tempThreads;
   return Boolean(tempThreads && typeof tempThreads === "object" && threadId in tempThreads);
-}
-
-export function isThreadCacheInvalidatedBySummary(
-  entries: readonly SessionEntry[],
-  threadId: string,
-  provider: string,
-  modelId: string,
-): boolean {
-  let latestAssistantIndex = -1;
-  let latestSummaryIndex = -1;
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index]!;
-    if (summaryAffectsThread(entry, threadId)) latestSummaryIndex = index;
-    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-    const messageThreadId = getRouterMetadata(entry.message)?.threadId ?? "origin";
-    if (
-      messageThreadId === threadId
-      && entry.message.provider === provider
-      && entry.message.model === modelId
-    ) latestAssistantIndex = index;
-  }
-  return latestSummaryIndex > latestAssistantIndex;
 }
 
 export function findCurrentModelEpochUsage(

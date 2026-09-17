@@ -25,6 +25,7 @@ import {
 import { Type } from "typebox";
 
 import { resolveTypeSafeApiKey } from "./auth.js";
+import { getCacheResetOpportunity, registerCacheResetDispatch } from "./cache-reset.js";
 import {
   collectOriginFileLists,
   collectTempCompactionInput,
@@ -71,7 +72,6 @@ import {
   findRecoverablePromotion,
   findThreadBranchPoint,
   getOriginContext,
-  isThreadCacheInvalidatedBySummary,
   messagesForPromotedSession,
   messagesFromEntries,
   restoreThreads,
@@ -270,14 +270,8 @@ function evaluateThreadModelSwitch(
     0,
   );
   const observedCacheRead = recentUsage.reduce((sum, usage) => sum + usage.cacheRead, 0);
-  const cacheInvalidated = incumbent
-    ? isThreadCacheInvalidatedBySummary(
-        ctx.sessionManager.getBranch(),
-        threadId,
-        incumbent.model.provider,
-        incumbent.model.id,
-      )
-    : false;
+  const cacheResetOpportunity = getCacheResetOpportunity(ctx.sessionManager.getBranch(), threadId);
+  const cacheInvalidated = cacheResetOpportunity !== undefined;
   const warmCacheRatio = cacheInvalidated
     ? 0
     : cacheInput > 0
@@ -311,6 +305,8 @@ function evaluateThreadModelSwitch(
     tierProbabilities: route.decision.tierProbabilities,
   }));
   return decideModelTransition({
+    ...(cacheResetOpportunity ? { cacheResetOpportunity } : {}),
+    taskPhase: "new-request",
     incumbent,
     requested,
     candidates,
@@ -425,6 +421,8 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   let runtimeInvalidated = false;
   let originFallbackForNext = false;
   let routeMetadataPersisted = false;
+
+  registerCacheResetDispatch(pi, () => activeRoute?.threadId ?? (originFallbackForNext ? "origin" : undefined));
 
   function setOriginContextToolEnabled(enabled: boolean): void {
     const active = pi.getActiveTools();

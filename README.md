@@ -116,7 +116,7 @@ Configure the policy through `/switchyard switching`. Model-specific economics o
 }
 ```
 
-Overrides take precedence over Pi metadata. Switchyard does not maintain a static model-price list. Input, cache-read, and cache-write tokens are estimated as separate pricing buckets; a nonzero cache-write price is never applied to every uncached token. Observed zero cache hits remain zero rather than being replaced by the warm-cache assumption. Compaction or branch summaries invalidate the old warmth estimate until the incumbent produces a new post-summary usage observation.
+Overrides take precedence over Pi metadata. Switchyard does not maintain a static model-price list. Input, cache-read, and cache-write tokens are estimated as separate pricing buckets; a nonzero cache-write price is never applied to every uncached token. Observed zero cache hits remain zero rather than being replaced by the warm-cache assumption. Compaction or branch summaries invalidate old cache observations. They also create a single-use switching opportunity for each affected logical thread, consumed at its first provider dispatch—not at a successful response. Later requests use normal current-epoch usage or configured assumptions; they cannot reuse that reset as a switching justification.
 
 ### What users see and what stays isolated
 
@@ -274,6 +274,20 @@ pnpm evaluate:live  # uses the configured TypeSafe key and consumes API usage
 ```
 
 Source control is managed with Jujutsu (`jj`).
+
+## Single-use post-compaction switching window
+
+A reset changes costs, **not task requirements or downgrade evidence**. The first provider request using an affected thread's new prefix compares a cold incumbent against a cold candidate. Confidence, trend evidence, return-risk reserve, and savings thresholds still apply.
+
+- **Mid-task automatic compaction:** continue on the task's assigned model; no new Jev/model decision is made. That continuation consumes the window.
+- **Compaction before a pending user prompt:** retain that prompt's Jev requirement. If it needs the incumbent, stay. A lower recommendation can use the window only if the normal evidence and economics gates pass.
+- **Idle/manual compaction:** do not switch immediately. Wait for the next user request and its actual requirement.
+- **First request stays:** the window is spent. A later cheap request may qualify under normal rules, but cannot invoke the old compaction again.
+- **Failure/retry:** a dispatch receipt is appended at Pi's `before_provider_request` boundary. Failure or cancellation after this boundary does not refund the opportunity. Cancellation before dispatch leaves it available.
+
+Receipts are non-model-visible entries in the active branch and survive reloads. A new successful compaction supplies a new window; a failed/cancelled compaction supplies none. Origin-only compaction does not reset unchanged temp histories. When routing is unavailable and the unfiltered transcript is dispatched, all pending windows it may use are conservatively consumed. This policy does not switch models from a compaction hook or execute a second model-selection pass between tool turns.
+
+The cost numbers remain estimates, not guaranteed savings or proof of provider-side cache state. A normal post-reset request can still report zero cache hits, but that observation is distinct from an unused compaction opportunity.
 
 ## Thread-aware compaction
 

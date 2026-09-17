@@ -1,4 +1,5 @@
 import type { Model, ModelCostRates } from "@earendil-works/pi-ai";
+import type { CacheResetOpportunity } from "./cache-reset.js";
 
 import type {
   RouteDecision,
@@ -44,7 +45,8 @@ export type ModelSwitchReason =
   | "same-model-stable-downgrade"
   | "shadow-downgrade"
   | "no-effective-downgrade"
-  | "dominated-economics";
+  | "dominated-economics"
+  | "in-flight-task-lock";
 
 export interface SwitchEconomics {
   contextTokens: number;
@@ -62,6 +64,7 @@ export interface SwitchEconomics {
 }
 
 export interface ModelSwitchDecision {
+  cacheResetOpportunity?: CacheResetOpportunity;
   selection: "candidate" | "incumbent";
   selected: RoutedModel;
   incumbent?: RoutedModel;
@@ -272,6 +275,9 @@ export interface DestinationEvaluation {
 }
 
 export interface ModelTransitionInput {
+  /** Only supplied while the first post-reset provider request is still undispatched. */
+  cacheResetOpportunity?: CacheResetOpportunity;
+  taskPhase?: "new-request" | "continuing";
   incumbent: RoutedModel | undefined;
   requested: RoutedModel;
   candidates: RoutedModel[];
@@ -400,9 +406,17 @@ function warmCostFromRates(
  * observations, candidate models, pricing, and policy explicitly. Historical evidence
  * may support a downgrade but can never override the current accepted requirement.
  */
-export function decideModelTransition(input: ModelTransitionInput): ModelTransitionDecision {
+export function decideModelTransition(rawInput: ModelTransitionInput): ModelTransitionDecision {
+  // A reset changes initial costs only, never the requirement or evidence gates.
+  const input: ModelTransitionInput = rawInput.cacheResetOpportunity
+    ? { ...rawInput, warmCacheRatio: 0, warmCacheSource: "invalidated" }
+    : rawInput;
   const { incumbent, requested, config } = input;
-  const immediate = evaluateModelSwitch({
+  const reset = input.cacheResetOpportunity ? { cacheResetOpportunity: input.cacheResetOpportunity } : {};
+  if (input.taskPhase === "continuing" && incumbent) {
+    return { ...reset, selection: "incumbent", selected: incumbent, incumbent, requested, reason: "in-flight-task-lock" };
+  }
+  const immediateResult = evaluateModelSwitch({
     incumbent,
     candidate: requested,
     tierConfidence: input.currentRecommendation.confidence,
@@ -414,6 +428,7 @@ export function decideModelTransition(input: ModelTransitionInput): ModelTransit
     expectedOutputTokens: input.expectedOutputTokens,
     config,
   });
+  const immediate: ModelSwitchDecision = { ...reset, ...immediateResult };
   if (!incumbent || !config.cacheAware) return { ...immediate, requested };
 
   const incumbentCapability = CAPABILITY_ORDER.indexOf(incumbent.tier);
@@ -450,6 +465,7 @@ export function decideModelTransition(input: ModelTransitionInput): ModelTransit
         incumbent,
         requested,
         reason: "capability-upgrade",
+        ...reset,
         evaluations,
       };
     }
@@ -638,6 +654,7 @@ export function decideModelTransition(input: ModelTransitionInput): ModelTransit
       ? "same-model-stable-downgrade"
       : "stable-downgrade";
   return {
+    ...reset,
     selection: config.downgradeMode === "shadow" ? "incumbent" : "candidate",
     selected: config.downgradeMode === "shadow" ? incumbent : winner.destination,
     incumbent,
@@ -673,7 +690,8 @@ export function formatMinimalSwitchDecision(
   requested: RoutedModel,
   thread: string,
 ): string {
-  const prefix = `Switchyard · ${thread}`;
+  const resetLabel = decision.cacheResetOpportunity ? ` · ${decision.cacheResetOpportunity.reason} reset` : "";
+  const prefix = `Switchyard · ${thread}${resetLabel}`;
   const current = decision.incumbent ? shortModel(decision.incumbent) : undefined;
   const selected = shortModel(decision.selected);
   if (!current) return `${prefix} · selected ${selected} · new thread`;
@@ -733,6 +751,15 @@ export function formatVerboseSwitchDecision(
     `reason:    ${decision.reason}`,
     `confidence: target ${(context.targetConfidence * 100).toFixed(1)}% · tier ${(context.tierConfidence * 100).toFixed(1)}%`,
   ];
+  if (decision.cacheResetOpportunity) {
+    lines.push(
+      "",
+      `cache state:   invalidated-by-${decision.cacheResetOpportunity.reason}`,
+      "switch window: first provider dispatch after reset (single-use)",
+      "initial costs: incumbent cold · candidate cold",
+    );
+  }
+  if (decision.reason === "in-flight-task-lock") lines.push("", "current task continues on its assigned model");
   if (decision.evidence) {
     const evidenceLines = CAPABILITY_ORDER
       .filter((tier) => decision.evidence?.[tier])
