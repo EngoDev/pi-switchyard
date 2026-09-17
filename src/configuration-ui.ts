@@ -4,7 +4,7 @@ import type {
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
-import { writeConfig, type ConfigScope } from "./config.js";
+import { writeConfigPatch, type ConfigScope } from "./config.js";
 import {
   TIER_NAMES,
   type RouterConfig,
@@ -50,10 +50,7 @@ async function chooseModel(
   models: readonly Model<any>[],
 ): Promise<Model<any> | undefined> {
   const byLabel = new Map(models.map((model) => [modelLabel(model), model]));
-  const selected = await ctx.ui.select(
-    `${tier}: choose model`,
-    [...byLabel.keys()],
-  );
+  const selected = await ctx.ui.select(`${tier}: choose model`, [...byLabel.keys()]);
   return selected ? byLabel.get(selected) : undefined;
 }
 
@@ -62,19 +59,15 @@ async function chooseThinking(
   tier: TierName,
   model: Model<any>,
 ): Promise<ThinkingSelection | undefined> {
-  const values = getThinkingSelections(model);
   const selected = await ctx.ui.select(
     `${tier}: thinking for ${model.provider}/${model.id}`,
-    values,
+    getThinkingSelections(model),
   );
   return selected as ThinkingSelection | undefined;
 }
 
 function formatConfig(config: RouterConfig): string {
-  const lines = [
-    `enabled: ${config.enabled}`,
-    `debug: ${config.debug}`,
-  ];
+  const lines = [`enabled: ${config.enabled}`, `debug: ${config.debug}`];
   for (const tier of TIER_NAMES) {
     const selected = config.tiers[tier];
     lines.push(
@@ -88,20 +81,52 @@ function formatConfig(config: RouterConfig): string {
 
 export interface ConfigurationHooks {
   getConfig(): RouterConfig;
-  setConfig(config: RouterConfig): void;
+  reloadConfig(ctx: ExtensionCommandContext): void;
   onDebugChanged(ctx: ExtensionCommandContext): void;
+}
+
+async function chooseScope(ctx: ExtensionCommandContext, title: string): Promise<ConfigScope | undefined> {
+  const scope = await ctx.ui.select(title, ["global", "project"]);
+  if (!scope) return undefined;
+  if (scope === "project" && !ctx.isProjectTrusted()) {
+    ctx.ui.notify("Project configuration requires a trusted project", "error");
+    return undefined;
+  }
+  return scope as ConfigScope;
+}
+
+function finishConfigChange(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): void {
+  hooks.reloadConfig(ctx);
+  hooks.onDebugChanged(ctx);
+}
+
+async function saveDebugToggle(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  const enabled = !hooks.getConfig().debug;
+  const scope = await chooseScope(ctx, "Save debug setting");
+  if (!scope) return;
+  const path = writeConfigPatch(ctx.cwd, scope, { debug: enabled });
+  finishConfigChange(ctx, hooks);
+  ctx.ui.notify(`Jev router debug ${hooks.getConfig().debug ? "enabled" : "disabled"} (${path})`, "info");
+}
+
+async function saveEnabled(
+  ctx: ExtensionCommandContext,
+  hooks: ConfigurationHooks,
+  enabled: boolean,
+): Promise<void> {
+  const scope = await chooseScope(ctx, "Save enabled setting");
+  if (!scope) return;
+  const path = writeConfigPatch(ctx.cwd, scope, { enabled });
+  finishConfigChange(ctx, hooks);
+  ctx.ui.notify(`Jev router ${hooks.getConfig().enabled ? "enabled" : "disabled"} (${path})`, "info");
 }
 
 async function runConfigurationWizard(
   ctx: ExtensionCommandContext,
   hooks: ConfigurationHooks,
 ): Promise<void> {
-  const scope = await ctx.ui.select("Save Jev router configuration", ["global", "project"]);
+  const scope = await chooseScope(ctx, "Save Jev router configuration");
   if (!scope) return;
-  if (scope === "project" && !ctx.isProjectTrusted()) {
-    ctx.ui.notify("Project configuration requires a trusted project", "error");
-    return;
-  }
 
   const models = availableModels(ctx);
   if (models.length === 0) {
@@ -130,16 +155,12 @@ async function runConfigurationWizard(
     return;
   }
 
-  const next: RouterConfig = {
-    ...hooks.getConfig(),
-    version: 1,
+  const path = writeConfigPatch(ctx.cwd, scope, {
     enabled: true,
     debug: debugSelection === "true",
     tiers,
-  };
-  const path = writeConfig(ctx.cwd, scope as ConfigScope, next);
-  hooks.setConfig(next);
-  hooks.onDebugChanged(ctx);
+  });
+  finishConfigChange(ctx, hooks);
   ctx.ui.notify(`Saved Jev router configuration to ${path}`, "info");
 }
 
@@ -148,39 +169,9 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
     description: "Configure and inspect the Jev session/model router",
     handler: async (args, ctx) => {
       const direct = args.trim().toLowerCase();
-      if (direct === "configure") {
-        await runConfigurationWizard(ctx, hooks);
-        return;
-      }
-      if (direct === "debug") {
-        const current = hooks.getConfig();
-        const next = { ...current, debug: !current.debug };
-        const scope = await ctx.ui.select("Save debug setting", ["global", "project"]);
-        if (!scope) return;
-        if (scope === "project" && !ctx.isProjectTrusted()) {
-          ctx.ui.notify("Project configuration requires a trusted project", "error");
-          return;
-        }
-        const path = writeConfig(ctx.cwd, scope as ConfigScope, next);
-        hooks.setConfig(next);
-        hooks.onDebugChanged(ctx);
-        ctx.ui.notify(`Jev router debug ${next.debug ? "enabled" : "disabled"} (${path})`, "info");
-        return;
-      }
-      if (direct === "on" || direct === "off") {
-        const next = { ...hooks.getConfig(), enabled: direct === "on" };
-        const scope = await ctx.ui.select("Save enabled setting", ["global", "project"]);
-        if (!scope) return;
-        if (scope === "project" && !ctx.isProjectTrusted()) {
-          ctx.ui.notify("Project configuration requires a trusted project", "error");
-          return;
-        }
-        const path = writeConfig(ctx.cwd, scope as ConfigScope, next);
-        hooks.setConfig(next);
-        hooks.onDebugChanged(ctx);
-        ctx.ui.notify(`Jev router ${next.enabled ? "enabled" : "disabled"} (${path})`, "info");
-        return;
-      }
+      if (direct === "configure") return runConfigurationWizard(ctx, hooks);
+      if (direct === "debug") return saveDebugToggle(ctx, hooks);
+      if (direct === "on" || direct === "off") return saveEnabled(ctx, hooks, direct === "on");
       if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
         return;
@@ -193,28 +184,9 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
         "show configuration",
       ]);
       if (action === "configure tiers") await runConfigurationWizard(ctx, hooks);
-      else if (action === "toggle debug") {
-        const next = { ...hooks.getConfig(), debug: !hooks.getConfig().debug };
-        const scope = await ctx.ui.select("Save debug setting", ["global", "project"]);
-        if (!scope) return;
-        if (scope === "project" && !ctx.isProjectTrusted()) {
-          ctx.ui.notify("Project configuration requires a trusted project", "error");
-          return;
-        }
-        writeConfig(ctx.cwd, scope as ConfigScope, next);
-        hooks.setConfig(next);
-        hooks.onDebugChanged(ctx);
-      } else if (action === "disable router" || action === "enable router") {
-        const next = { ...hooks.getConfig(), enabled: action === "enable router" };
-        const scope = await ctx.ui.select("Save enabled setting", ["global", "project"]);
-        if (!scope) return;
-        if (scope === "project" && !ctx.isProjectTrusted()) {
-          ctx.ui.notify("Project configuration requires a trusted project", "error");
-          return;
-        }
-        writeConfig(ctx.cwd, scope as ConfigScope, next);
-        hooks.setConfig(next);
-        hooks.onDebugChanged(ctx);
+      else if (action === "toggle debug") await saveDebugToggle(ctx, hooks);
+      else if (action === "disable router" || action === "enable router") {
+        await saveEnabled(ctx, hooks, action === "enable router");
       } else if (action === "show configuration") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       }

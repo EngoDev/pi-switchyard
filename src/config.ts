@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -12,11 +12,21 @@ export const DEFAULT_CONFIG: RouterConfig = {
   tiers: {},
   routerContextMessages: 5,
   initialParentMessages: 5,
-  targetConfidenceFloor: 0.45,
+  targetConfidenceFloor: 0.15,
   tierConfidenceFloor: 0.45,
 };
 
 export type ConfigScope = "global" | "project";
+const THINKING_SELECTIONS = new Set([
+  "default",
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 
 export function getConfigPath(cwd: string, scope: ConfigScope): string {
   return scope === "global"
@@ -32,7 +42,8 @@ function isTierConfig(value: unknown): value is TierConfig {
     candidate.provider.length > 0 &&
     typeof candidate.modelId === "string" &&
     candidate.modelId.length > 0 &&
-    typeof candidate.thinking === "string"
+    typeof candidate.thinking === "string" &&
+    THINKING_SELECTIONS.has(candidate.thinking)
   );
 }
 
@@ -74,9 +85,13 @@ function readConfigFile(path: string): Partial<RouterConfig> {
   }
 }
 
-export function loadConfig(cwd: string): RouterConfig {
-  const globalConfig = readConfigFile(getConfigPath(cwd, "global"));
-  const projectConfig = readConfigFile(getConfigPath(cwd, "project"));
+export function readScopeConfig(cwd: string, scope: ConfigScope): Partial<RouterConfig> {
+  return readConfigFile(getConfigPath(cwd, scope));
+}
+
+export function loadConfig(cwd: string, includeProject = false): RouterConfig {
+  const globalConfig = readScopeConfig(cwd, "global");
+  const projectConfig = includeProject ? readScopeConfig(cwd, "project") : {};
   return {
     ...DEFAULT_CONFIG,
     ...globalConfig,
@@ -90,11 +105,32 @@ export function loadConfig(cwd: string): RouterConfig {
   };
 }
 
-export function writeConfig(cwd: string, scope: ConfigScope, config: RouterConfig): string {
+function writeConfigValue(cwd: string, scope: ConfigScope, config: Partial<RouterConfig>): string {
   const path = getConfigPath(cwd, scope);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  chmodSync(path, 0o600);
   return path;
+}
+
+export function writeConfig(cwd: string, scope: ConfigScope, config: RouterConfig): string {
+  return writeConfigValue(cwd, scope, config);
+}
+
+export function writeConfigPatch(
+  cwd: string,
+  scope: ConfigScope,
+  patch: Partial<RouterConfig>,
+): string {
+  const current = readScopeConfig(cwd, scope);
+  const tiers = patch.tiers ? { ...current.tiers, ...patch.tiers } : current.tiers;
+  const next: Partial<RouterConfig> = {
+    ...current,
+    ...patch,
+    version: 1,
+    ...(tiers ? { tiers } : {}),
+  };
+  return writeConfigValue(cwd, scope, next);
 }
 
 export function isConfigured(config: RouterConfig): config is RouterConfig & {

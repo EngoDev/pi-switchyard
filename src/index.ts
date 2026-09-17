@@ -64,7 +64,7 @@ function findLastRoute(entries: readonly SessionEntry[]): ActiveRoute | undefine
   return undefined;
 }
 
-function routeStatus(route: ActiveRoute, effectiveThinking: ThinkingLevel): string {
+export function formatRouteStatus(route: ActiveRoute, effectiveThinking: ThinkingLevel): string {
   const thread = route.threadId === "parent" ? "parent" : `temp:${route.threadName}`;
   return `jev ${thread} · ${route.tier} · ${route.provider}/${route.modelId} · ${effectiveThinking}`;
 }
@@ -102,7 +102,9 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   let threads = new Map<string, TempThread>();
   let activeRoute: ActiveRoute | undefined;
   let lastVisibleRoute: ActiveRoute | undefined;
-  let needsTreeLabel = false;
+  let pendingThreadCreated: TempThread | undefined;
+  let pendingRoutePrompt: string | undefined;
+  let routeMetadataPersisted = false;
 
   function setParentContextToolEnabled(enabled: boolean): void {
     const active = pi.getActiveTools();
@@ -115,12 +117,22 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     ctx.ui.setStatus(STATUS_KEY, undefined);
   }
 
+  function restoreBranchState(ctx: ExtensionContext): void {
+    const branch = ctx.sessionManager.getBranch();
+    threads = restoreThreads(branch);
+    activeRoute = undefined;
+    lastVisibleRoute = findLastRoute(branch);
+    pendingThreadCreated = undefined;
+    pendingRoutePrompt = undefined;
+    routeMetadataPersisted = false;
+  }
+
   function showDebugStatus(ctx: ExtensionContext, route: ActiveRoute): void {
     if (!config.debug) {
       clearDebugStatus(ctx);
       return;
     }
-    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", routeStatus(route, pi.getThinkingLevel())));
+    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", formatRouteStatus(route, pi.getThinkingLevel())));
   }
 
   pi.registerTool({
@@ -163,8 +175,8 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 
   registerConfigurationCommand(pi, {
     getConfig: () => config,
-    setConfig: (next) => {
-      config = next;
+    reloadConfig: (ctx) => {
+      config = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     },
     onDebugChanged: (ctx) => {
       if (config.enabled && config.debug && routeClient && lastVisibleRoute) {
@@ -176,11 +188,8 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, ctx) => {
-    config = loadConfig(ctx.cwd);
-    threads = restoreThreads(ctx.sessionManager.getEntries());
-    activeRoute = undefined;
-    lastVisibleRoute = findLastRoute(ctx.sessionManager.getEntries());
-    needsTreeLabel = false;
+    config = loadConfig(ctx.cwd, ctx.isProjectTrusted());
+    restoreBranchState(ctx);
     routeClient = undefined;
     setParentContextToolEnabled(false);
 
@@ -207,20 +216,28 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("input", async (event, ctx) => {
-    if (event.source === "extension") return { action: "continue" };
-    if (event.streamingBehavior) return { action: "continue" };
+  pi.on("session_tree", (_event, ctx) => {
+    setParentContextToolEnabled(false);
+    restoreBranchState(ctx);
+    if (config.debug && routeClient && lastVisibleRoute) showDebugStatus(ctx, lastVisibleRoute);
+    else clearDebugStatus(ctx);
+  });
 
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
-    needsTreeLabel = false;
+    pendingThreadCreated = undefined;
+    pendingRoutePrompt = undefined;
+    routeMetadataPersisted = false;
+
     if (!routeClient || !config.enabled || !isConfigured(config)) {
       clearDebugStatus(ctx);
-      return { action: "continue" };
+      return;
     }
 
     const sessionMessages = getSessionMessages(ctx);
     const decision = await decideRoute(routeClient, {
-      prompt: event.text,
+      prompt: event.prompt,
       hasImages: (event.images?.length ?? 0) > 0,
       parentContext: getParentContext(sessionMessages, config.routerContextMessages),
       threads: [...threads.values()],
@@ -240,45 +257,41 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     // Jev unavailable, timed out, or returned an unusable answer: Pi proceeds untouched.
     if (!decision) {
       clearDebugStatus(ctx);
-      return { action: "continue" };
+      return;
     }
 
     const resolved = resolveTierModel(ctx, config, decision.tier, (event.images?.length ?? 0) > 0);
     if (!resolved) {
       clearDebugStatus(ctx);
-      return { action: "continue" };
+      return;
     }
 
     let targetThread: TempThread | undefined;
     if (decision.target === "new_temp") {
       targetThread = createTempThread(
-        event.text,
+        event.prompt,
         getParentContext(sessionMessages, config.initialParentMessages),
         [...threads.values()].map((thread) => thread.name),
       );
+      pendingThreadCreated = targetThread;
+      threads.set(targetThread.id, targetThread);
     } else if (decision.target !== "parent") {
       targetThread = threads.get(decision.target);
       if (!targetThread) {
         clearDebugStatus(ctx);
-        return { action: "continue" };
+        return;
       }
     }
 
     const modelSet = await pi.setModel(resolved.model);
     if (!modelSet) {
+      if (pendingThreadCreated) threads.delete(pendingThreadCreated.id);
+      pendingThreadCreated = undefined;
       clearDebugStatus(ctx);
-      return { action: "continue" };
+      return;
     }
     if (resolved.tierConfig.thinking !== "default") {
       pi.setThinkingLevel(resolved.tierConfig.thinking);
-    }
-
-    if (targetThread && !threads.has(targetThread.id)) {
-      threads.set(targetThread.id, targetThread);
-      pi.appendEntry(ROUTER_ENTRY_TYPE, {
-        kind: "thread-created",
-        thread: targetThread,
-      } satisfies RouterSessionEntryData);
     }
 
     activeRoute = {
@@ -291,27 +304,36 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
       decision: { ...decision, tier: resolved.tier },
     };
     lastVisibleRoute = activeRoute;
-    needsTreeLabel = activeRoute.threadId !== "parent";
+    pendingRoutePrompt = event.prompt;
     setParentContextToolEnabled(activeRoute.threadId !== "parent");
-    pi.appendEntry(ROUTER_ENTRY_TYPE, {
-      kind: "route",
-      route: activeRoute,
-      prompt: event.text,
-      timestamp: new Date().toISOString(),
-    } satisfies RouterSessionEntryData);
     showDebugStatus(ctx, activeRoute);
-
-    return { action: "continue" };
+    if (config.debug) {
+      const thread = activeRoute.threadId === "parent" ? "parent" : `temp:${activeRoute.threadName}`;
+      ctx.ui.notify(
+        `Jev route → ${thread} | ${activeRoute.tier} | ${activeRoute.provider}/${activeRoute.modelId} | thinking:${pi.getThinkingLevel()} | confidence target:${activeRoute.decision.targetConfidence.toFixed(2)} tier:${activeRoute.decision.tierConfidence.toFixed(2)}`,
+        "info",
+      );
+    }
   });
 
   pi.on("message_end", (event) => {
     if (!activeRoute || activeRoute.threadId === "parent") return;
+    const metadata = {
+      threadId: activeRoute.threadId,
+      threadName: activeRoute.threadName,
+    };
+    const existingDetails = event.message.role === "custom"
+      && event.message.details
+      && typeof event.message.details === "object"
+      && !Array.isArray(event.message.details)
+      ? event.message.details as Record<string, unknown>
+      : {};
     const tagged: TaggedAgentMessage = {
       ...event.message,
-      jevRouter: {
-        threadId: activeRoute.threadId,
-        threadName: activeRoute.threadName,
-      },
+      ...(event.message.role === "custom"
+        ? { details: { ...existingDetails, jevRouter: metadata } }
+        : {}),
+      jevRouter: metadata,
     };
     const thread = threads.get(activeRoute.threadId);
     if (thread) updateThreadFromMessage(thread, event.message);
@@ -329,24 +351,45 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("turn_start", (_event, ctx) => {
-    if (!needsTreeLabel || !activeRoute || activeRoute.threadId === "parent") return;
+    if (routeMetadataPersisted || !activeRoute || !pendingRoutePrompt) return;
     const leafId = ctx.sessionManager.getLeafId();
     const leaf = leafId ? ctx.sessionManager.getEntry(leafId) : undefined;
-    if (leaf?.type === "message" && leaf.message.role === "user") {
+    if (activeRoute.threadId !== "parent" && leaf?.type === "message" && leaf.message.role === "user") {
       pi.setLabel(leaf.id, `temp:${activeRoute.threadName}`);
     }
-    needsTreeLabel = false;
+    if (pendingThreadCreated) {
+      pi.appendEntry(ROUTER_ENTRY_TYPE, {
+        kind: "thread-created",
+        thread: pendingThreadCreated,
+      } satisfies RouterSessionEntryData);
+    }
+    pi.appendEntry(ROUTER_ENTRY_TYPE, {
+      kind: "route",
+      route: activeRoute,
+      prompt: pendingRoutePrompt,
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    routeMetadataPersisted = true;
+    pendingThreadCreated = undefined;
+    pendingRoutePrompt = undefined;
   });
 
   pi.on("agent_settled", () => {
     setParentContextToolEnabled(false);
+    if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
-    needsTreeLabel = false;
+    pendingThreadCreated = undefined;
+    pendingRoutePrompt = undefined;
+    routeMetadataPersisted = false;
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     setParentContextToolEnabled(false);
+    if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
+    pendingThreadCreated = undefined;
+    pendingRoutePrompt = undefined;
+    routeMetadataPersisted = false;
     routeClient = undefined;
     clearDebugStatus(ctx);
   });

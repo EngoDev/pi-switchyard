@@ -8,6 +8,7 @@ import {
   filterMessagesForThread,
   getParentContext,
   makeThreadName,
+  messagesFromEntries,
 } from "../src/threads.js";
 import type { TaggedAgentMessage, TempThread } from "../src/types.js";
 
@@ -57,6 +58,20 @@ test("temp context contains a seed snapshot and only its own messages", () => {
   assert.equal(filtered.length, 3);
   assert.match(JSON.stringify(filtered[0]), /Implement routing/);
   assert.deepEqual(filtered.slice(1).map((message) => message.timestamp), [2, 3]);
+});
+
+test("custom-message temp metadata is restored from persisted details", () => {
+  const messages = messagesFromEntries([{
+    type: "custom_message",
+    id: "entry1",
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    customType: "other-extension",
+    content: "temp context",
+    display: false,
+    details: { jevRouter: { threadId: "t1", threadName: "temp" } },
+  }]);
+  assert.equal((messages[0] as TaggedAgentMessage | undefined)?.jevRouter?.threadId, "t1");
 });
 
 test("thread names are readable and unique", () => {

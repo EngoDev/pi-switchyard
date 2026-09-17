@@ -1,5 +1,6 @@
 import { choice, type ChoiceCriteria, type EntryType, type RequestOptions } from "@typesafe-ai/sdk";
 
+import { sanitizeForRouter } from "./privacy.js";
 import { TIER_NAMES, type RouteDecision, type RouterConfig, type TempThread, type TierName } from "./types.js";
 import type { ParentContextItem } from "./types.js";
 
@@ -71,12 +72,14 @@ function buildTargetCriteria(threads: readonly TempThread[]): {
     parent: {
       what: "Continue the primary work in the parent conversation.",
       use_when: "The request advances, changes, verifies, or depends directly on the main task, or its result should remain in the main task's future context.",
-      not_for: "Bounded side questions, administrative checks, or unrelated work whose transcript would distract the main task.",
+      not_for: "Bounded side questions, status checks, pull-request or branch administration, or unrelated work whose transcript would distract the main task.",
+      examples: ["Continue implementing the router", "Use the design we agreed on to fix the remaining tests"],
     },
     new_temp: {
       what: "Create a new isolated temporary thread seeded with a small snapshot of the parent.",
       use_when: "The request is a bounded aside, status/admin operation, unrelated question, or independently completable task that does not belong in the primary task's future context.",
       not_for: "A follow-up to an existing temp thread or a direct continuation of the primary work.",
+      examples: ["Did you create a pull request?", "What branch are we on?", "Explain an unrelated concept"],
     },
   };
   const optionToThreadId = new Map<string, string>();
@@ -85,9 +88,9 @@ function buildTargetCriteria(threads: readonly TempThread[]): {
     optionToThreadId.set(option, thread.id);
     criteria[option] = {
       what: `Continue the existing temporary thread named ${thread.name}.`,
-      original_purpose: thread.firstPrompt,
-      latest_user_message: thread.lastUserText ?? "",
-      latest_assistant_answer: thread.lastAssistantText ?? "",
+      original_purpose: sanitizeForRouter(thread.firstPrompt, 1_200),
+      latest_user_message: sanitizeForRouter(thread.lastUserText ?? "", 1_200),
+      latest_assistant_answer: sanitizeForRouter(thread.lastAssistantText ?? "", 1_200),
       use_when: "The new request follows up on, confirms, corrects, or continues this specific temporary thread.",
     };
   }
@@ -129,21 +132,21 @@ export async function decideRoute(client: RouteClient, request: RouteRequest): P
         model: "jev-latest",
         state: {
           request: {
-            text: request.prompt,
+            text: sanitizeForRouter(request.prompt, 8_000),
             has_images: request.hasImages,
           },
           parent_context: request.parentContext.map((item) => ({
             role: item.role,
-            text: item.text,
+            text: sanitizeForRouter(item.text, 2_000),
             timestamp: item.timestamp,
             tool_name: item.toolName ?? null,
           })),
           existing_temp_threads: request.threads.map((thread) => ({
             id: thread.id,
             name: thread.name,
-            original_purpose: thread.firstPrompt,
-            latest_user_message: thread.lastUserText ?? "",
-            latest_assistant_answer: thread.lastAssistantText ?? "",
+            original_purpose: sanitizeForRouter(thread.firstPrompt, 1_200),
+            latest_user_message: sanitizeForRouter(thread.lastUserText ?? "", 1_200),
+            latest_assistant_answer: sanitizeForRouter(thread.lastAssistantText ?? "", 1_200),
           })),
           last_visible_route: request.lastVisibleRoute ?? null,
           configured_tiers: configuredTiers,

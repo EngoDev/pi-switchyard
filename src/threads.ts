@@ -72,6 +72,15 @@ export function messagesFromEntries(entries: readonly SessionEntry[]): AgentMess
   for (const entry of entries) {
     if (entry.type === "message") messages.push(entry.message);
     if (entry.type === "custom_message") {
+      const details = entry.details && typeof entry.details === "object"
+        ? entry.details as Record<string, unknown>
+        : undefined;
+      const routerMetadata = details?.jevRouter;
+      const jevRouter = routerMetadata && typeof routerMetadata === "object"
+        && typeof (routerMetadata as Record<string, unknown>).threadId === "string"
+        && typeof (routerMetadata as Record<string, unknown>).threadName === "string"
+        ? routerMetadata as { threadId: string; threadName: string }
+        : undefined;
       messages.push({
         role: "custom",
         customType: entry.customType,
@@ -79,7 +88,8 @@ export function messagesFromEntries(entries: readonly SessionEntry[]): AgentMess
         display: entry.display,
         details: entry.details,
         timestamp: new Date(entry.timestamp).getTime(),
-      });
+        ...(jevRouter ? { jevRouter } : {}),
+      } as TaggedAgentMessage);
     }
   }
   return messages;
