@@ -64,6 +64,22 @@ test("untrusted project configuration is ignored", () => {
   }
 });
 
+test("temp thread limits load compatibly and normalize configured values", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-limits-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(getConfigPath(cwd, "project"), JSON.stringify({
+      tempThreadSoftTokenLimit: 500,
+      tempThreadSoftTurnLimit: 0,
+    }));
+    const loaded = loadConfig(cwd, true);
+    assert.equal(loaded.tempThreadSoftTokenLimit, 1_000);
+    assert.equal(loaded.tempThreadSoftTurnLimit, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("missing model tiers leave automatic routing unconfigured", () => {
   assert.equal(isConfigured(DEFAULT_CONFIG), false);
 });

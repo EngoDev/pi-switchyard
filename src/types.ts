@@ -19,6 +19,8 @@ export interface RouterConfig {
   initialOriginMessages: number;
   targetConfidenceFloor: number;
   tierConfidenceFloor: number;
+  tempThreadSoftTokenLimit: number;
+  tempThreadSoftTurnLimit: number;
 }
 
 export interface TempThread {
@@ -40,7 +42,7 @@ export interface OriginContextItem {
 }
 
 export interface RouteDecision {
-  target: "origin" | "new_temp" | string;
+  target: "origin" | "new_temp_from_origin" | string;
   tier: TierName;
   targetConfidence: number;
   tierConfidence: number;
@@ -74,6 +76,63 @@ export interface PersistedThreadCreated {
   thread: TempThread;
 }
 
+export interface PersistedThreadRetired {
+  kind: "thread-retired";
+  threadId: string;
+  threadName: string;
+  reason: "summarized-to-origin" | "promoted";
+  timestamp: string;
+}
+
+export interface PersistedLifecyclePending {
+  kind: "lifecycle-pending";
+  token: string;
+  pendingPrompt: string;
+  pendingImageCount: number;
+  timestamp: string;
+}
+
+export interface PersistedLifecycleCompleted {
+  kind: "lifecycle-completed";
+  token: string;
+  timestamp: string;
+}
+
+export interface PersistedPromotionPending {
+  kind: "promotion-pending";
+  token: string;
+  thread: TempThread;
+  pendingPrompt: string;
+  pendingImageCount: number;
+  timestamp: string;
+}
+
+export interface PersistedPromotionCompleted {
+  kind: "promotion-completed";
+  token: string;
+  childSession?: string;
+  outcome: "completed" | "cancelled";
+  timestamp: string;
+}
+
+export interface PersistedPromotedSession {
+  kind: "promoted-session";
+  token: string;
+  sourceSession?: string;
+  sourceEntryId?: string;
+  sourceThreadId: string;
+  sourceThreadName: string;
+  pendingPrompt: string;
+  pendingImageCount: number;
+}
+
+export interface PersistedPromotionConsumed {
+  kind: "promotion-consumed";
+  token: string;
+  pendingPrompt: string;
+  timestamp: string;
+}
+
 export interface PersistedRoute {
   kind: "route";
   route: ActiveRoute;
@@ -81,4 +140,13 @@ export interface PersistedRoute {
   timestamp: string;
 }
 
-export type RouterSessionEntryData = PersistedThreadCreated | PersistedRoute;
+export type RouterSessionEntryData =
+  | PersistedThreadCreated
+  | PersistedThreadRetired
+  | PersistedLifecyclePending
+  | PersistedLifecycleCompleted
+  | PersistedPromotionPending
+  | PersistedPromotionCompleted
+  | PersistedPromotedSession
+  | PersistedPromotionConsumed
+  | PersistedRoute;

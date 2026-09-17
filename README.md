@@ -36,7 +36,9 @@ It is less useful for a short, single-purpose conversation where every message d
 
 Switchyard normally keeps a request in **origin** when it advances the primary task, depends on origin decisions, changes shared implementation work, or should inform future origin work.
 
-It normally creates or reuses a **temp** thread when the request is an administrative/status check, a bounded research or verification aside, an unrelated question, or a follow-up to an existing temp task. New temp threads receive a small origin snapshot. They can call `get_context_from_origin` if they need a precise additional slice.
+It normally creates or reuses a **temp** thread when the request is an administrative/status check, a bounded research or verification aside, an unrelated question, or a follow-up to an existing temp task. Temp threads are always flat siblings rooted at origin; Switchyard never nests one temp beneath another.
+
+While a temp is visible, Jev can choose `new_temp_from_origin` only when the request needs origin context and is independent of facts, conclusions, tool results, and unresolved work unique to the visible temp. A request that needs that temp-specific context stays in the existing temp, even if it introduces a related subtopic. New sibling temps receive a small origin snapshot and can call `get_context_from_origin` for a precise additional slice.
 
 Thread routing is probabilistic. Low-confidence target choices deliberately stay in origin rather than silently isolating work that might matter to the primary task.
 
@@ -64,7 +66,9 @@ Temp turns are marked as `temp:<thread-name>` in `/tree`. The messages are store
 - Routes among `genius`, `smart`, `handy`, and `cheap` tiers.
 - Keeps bounded side work in provider-isolated logical temp threads while preserving Pi's native transcript, reasoning, tools, and working UI.
 - Reuses relevant temp threads when a request follows an earlier aside.
+- Creates only flat sibling temps from origin; temp threads never nest.
 - Gives each new temp thread the last five origin user/assistant messages by default.
+- Escalates a selected temp before an idle request would cross its configurable soft token or turn limit.
 - Makes `get_context_from_origin` available only during temp-thread turns for bounded, filtered retrieval.
 - Labels both temp user prompts and assistant answers as `temp:<thread-name>` in `/tree`.
 - Sends only bounded excerpts to Jev after best-effort credential redaction.
@@ -108,7 +112,7 @@ The first menu lists `genius`, `smart`, `handy`, and `cheap` with each tier's cu
 - Filters by model ID, provider, or model name as you type
 - Marks the category's current model
 
-After selecting a model, choose its thinking level and whether to save globally or for the current trusted project. The menu then reopens so several categories can be changed in one visit; press Escape in the main Switchyard menu to finish. Debug and enabled state are also editable from the first menu.
+After selecting a model, choose its thinking level and whether to save globally or for the current trusted project. The menu then reopens so several categories can be changed in one visit; press Escape in the main Switchyard menu to finish. Debug, enabled state, and temp-thread soft limits are also editable from the first menu. Limits default to 32,000 estimated tokens and 12 user turns; set either value to `0` to disable that limit.
 
 Direct command forms:
 
@@ -119,6 +123,7 @@ Direct command forms:
 /switchyard cheap
 /switchyard show
 /switchyard debug
+/switchyard limits
 /switchyard on
 /switchyard off
 ```
@@ -144,7 +149,7 @@ When `debug` is false, routing remains visually transparent except for normal Pi
 
 The extension sends one System One request containing two independent `Choice` questions:
 
-1. **Target thread:** origin, new temp, or one of the existing temp threads
+1. **Target thread:** origin, `new_temp_from_origin`, or one of the existing temp threads
 2. **Model tier:** genius, smart, handy, or cheap
 
 Code owns model selection, thinking configuration, context filtering, confidence policy, and side effects.
@@ -154,6 +159,16 @@ Default confidence behavior:
 - Target confidence below `0.15`: stay on the origin thread
 - Tier confidence below `0.45`: move up one capability tier
 - Missing/failed Jev response: do nothing and let Pi process the request normally
+
+## Bounded temp-thread lifecycle
+
+Before dispatching an idle request that Jev assigned to an existing temp, Switchyard estimates the selected thread's context after adding the pending prompt. When its configured token or turn soft limit is reached, the prompt is held and the user chooses:
+
+- **Promote to a child session:** durably mark the promotion, retire the logical temp in the source session, create a Pi session whose `parentSession` is the source session, transfer the temp's origin seed and complete replayable history without temp-routing tags, preserve skill/template expansion, and submit the held prompt as the new session's origin work. If replacement is interrupted, reopening the source session recovers the temp and restores the pending text.
+- **Summarize into origin:** summarize only the selected temp with a cancellable progress dialog, retire it, append a visibly attributed origin handoff, then reroute the held prompt through the same lifecycle checks with the handoff available. If rerouting fails, the held prompt still receives origin-only context. Navigation, session replacement, and reload invalidate an in-flight lifecycle summary before it can mutate another branch.
+- **Cancel:** do not dispatch the prompt and restore its text to the editor. Pi cannot restore image attachments to the editor, so Switchyard explicitly asks the user to reattach them.
+
+Promotion is offered only for persisted sessions. In non-interactive modes where no dialog is available, Switchyard never drops the request: it continues with the selected temp and leaves lifecycle action to a later interactive turn.
 
 ## Origin context tool
 

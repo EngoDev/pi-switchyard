@@ -1,16 +1,23 @@
+import { existsSync } from "node:fs";
+
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model, Usage } from "@earendil-works/pi-ai";
+import type { ImageContent, Model, Usage } from "@earendil-works/pi-ai";
 import { StringEnum, uuidv7 } from "@earendil-works/pi-ai";
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import {
+  BorderedLoader,
   convertToLlm,
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
   serializeConversation,
+  SessionManager,
   truncateHead,
   type ExtensionAPI,
+  type ExtensionCommandContext,
   type ExtensionContext,
+  type InputEvent,
+  type InputEventResult,
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -28,6 +35,12 @@ import {
 } from "./compaction.js";
 import { isConfigured, loadConfig } from "./config.js";
 import { registerConfigurationCommand } from "./configuration-ui.js";
+import {
+  ensurePromotionMessagesDurable,
+  fingerprintImages,
+  formatTempThreadHandoff,
+  projectTempThreadBudget,
+} from "./lifecycle.js";
 import { decideRoute, type RouteClient } from "./router.js";
 import {
   formatOriginContextResult,
@@ -39,7 +52,12 @@ import {
   createTempThread,
   filterMessagesForOrigin,
   findMissingTempLabels,
+  findPendingPromotedPrompt,
+  findRecoverableLifecycle,
+  findRecoverablePromotion,
+  findThreadBranchPoint,
   getOriginContext,
+  messagesForPromotedSession,
   messagesFromEntries,
   restoreThreads,
   threadContextFromEntries,
@@ -61,6 +79,29 @@ const STATUS_KEY = "switchyard";
 const ORIGIN_CONTEXT_TOOL = "get_context_from_origin";
 const CAPABILITY_ORDER: TierName[] = ["cheap", "handy", "smart", "genius"];
 
+type PendingRouteDecision = {
+  prompt: string;
+  imageFingerprint: string;
+  decision: Awaited<ReturnType<typeof decideRoute>>;
+};
+
+type RequestIdentity = {
+  generation: number;
+  sessionFile: string | undefined;
+  leafId: string | null;
+};
+
+type PendingPromotion = {
+  token: string;
+  lifecycleToken: string;
+  prompt: string;
+  images?: ImageContent[];
+  thread: TempThread;
+  messages: AgentMessage[];
+  parentSession?: string;
+  sourceEntryId?: string;
+};
+
 function toRouteClient(client: TypeSafeClient): RouteClient {
   return {
     systemOne: async (request, options) => {
@@ -72,13 +113,18 @@ function toRouteClient(client: TypeSafeClient): RouteClient {
 function normalizePersistedRoute(route: ActiveRoute): ActiveRoute {
   const legacyOrigin = route.threadId === ("parent" as string);
   const legacyTarget = route.decision.target === "parent";
+  const target = legacyTarget
+    ? "origin"
+    : route.decision.target === "new_temp"
+      ? "new_temp_from_origin"
+      : route.decision.target;
   return {
     ...route,
     threadId: legacyOrigin ? "origin" : route.threadId,
     threadName: legacyOrigin ? "origin" : route.threadName,
     decision: {
       ...route.decision,
-      target: legacyTarget ? "origin" : route.decision.target,
+      target,
     },
   };
 }
@@ -91,6 +137,7 @@ function findLastRoute(entries: readonly SessionEntry[]): ActiveRoute | undefine
       || (entry.customType !== SWITCHYARD_ENTRY_TYPE && entry.customType !== LEGACY_ROUTER_ENTRY_TYPE)
     ) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
+    if (data?.kind === "thread-retired") return undefined;
     if (data?.kind === "route") return normalizePersistedRoute(data.route);
   }
   return undefined;
@@ -201,7 +248,9 @@ Do not continue the conversation. Messages from other logical threads have alrea
   const summary = response.content
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
-    .join("\n");
+    .join("\n")
+    .trim();
+  if (!summary) throw new Error("Thread-aware summarization returned an empty summary");
   return { summary, usage: response.usage };
 }
 
@@ -214,6 +263,16 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   let pendingThreadCreated: TempThread | undefined;
   let pendingRoutePrompt: string | undefined;
   let pendingCompactionFileLists: { readFiles: string[]; modifiedFiles: string[] } | undefined;
+  let pendingRouteDecision: PendingRouteDecision | undefined;
+  let forcePromotedPrompt: ReturnType<typeof findPendingPromotedPrompt>;
+  let recoverablePromotion: ReturnType<typeof findRecoverablePromotion>;
+  let recoverableLifecycle: ReturnType<typeof findRecoverableLifecycle>;
+  let pendingPromotedToConsume: { token: string; prompt: string } | undefined;
+  const pendingPromotions = new Map<string, PendingPromotion>();
+  let lifecycleGeneration = 0;
+  let activeLifecycleController: AbortController | undefined;
+  let runtimeInvalidated = false;
+  let originFallbackForNext = false;
   let routeMetadataPersisted = false;
 
   function setOriginContextToolEnabled(enabled: boolean): void {
@@ -234,6 +293,12 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     lastVisibleRoute = findLastRoute(branch);
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingRouteDecision = undefined;
+    forcePromotedPrompt = findPendingPromotedPrompt(branch);
+    recoverablePromotion = findRecoverablePromotion(branch);
+    recoverableLifecycle = findRecoverableLifecycle(branch);
+    pendingPromotedToConsume = undefined;
+    originFallbackForNext = false;
     routeMetadataPersisted = false;
   }
 
@@ -251,6 +316,237 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       return;
     }
     ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", formatRouteStatus(route, pi.getThinkingLevel())));
+  }
+
+  function invalidateLifecycle(): void {
+    lifecycleGeneration += 1;
+    activeLifecycleController?.abort();
+    activeLifecycleController = undefined;
+  }
+
+  function captureRequestIdentity(ctx: ExtensionContext): RequestIdentity {
+    return {
+      generation: lifecycleGeneration,
+      sessionFile: ctx.sessionManager.getSessionFile(),
+      leafId: ctx.sessionManager.getLeafId(),
+    };
+  }
+
+  function requestIdentityIsCurrent(identity: RequestIdentity, ctx: ExtensionContext): boolean {
+    return identity.generation === lifecycleGeneration
+      && !runtimeInvalidated
+      && ctx.sessionManager.getSessionFile() === identity.sessionFile
+      && ctx.sessionManager.getLeafId() === identity.leafId;
+  }
+
+  function restoreHeldPromptIfCurrent(identity: RequestIdentity, event: InputEvent, ctx: ExtensionContext): void {
+    if (runtimeInvalidated || ctx.sessionManager.getSessionFile() !== identity.sessionFile) return;
+    const sameLogicalPlace = identity.generation === lifecycleGeneration
+      || ctx.sessionManager.getLeafId() === identity.leafId;
+    if (!sameLogicalPlace) return;
+    ctx.ui.setEditorText(event.text);
+    const imageNote = event.images?.length
+      ? ` Reattach ${event.images.length} image(s) before resubmitting.`
+      : "";
+    ctx.ui.notify(`The pending message was cancelled because the session context changed.${imageNote}`, "warning");
+  }
+
+  async function summarizeTempForLifecycle(
+    thread: TempThread,
+    ctx: ExtensionContext,
+  ): Promise<
+    | { action: "summary"; result: OriginSummaryResult }
+    | { action: "cancelled"; stale: boolean }
+    | { action: "error"; error: unknown }
+  > {
+    const generation = ++lifecycleGeneration;
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    const leafId = ctx.sessionManager.getLeafId();
+    const controller = new AbortController();
+    activeLifecycleController = controller;
+    const request: OriginSummaryRequest = {
+      scope: { kind: "temp", threadId: thread.id, threadName: thread.name },
+      messages: threadContextFromEntries(ctx.sessionManager.getBranch(), thread),
+      previousSummary: undefined,
+      customInstructions: undefined,
+    };
+
+    try {
+      let outcome:
+        | { action: "summary"; result: OriginSummaryResult }
+        | { action: "error"; error: unknown }
+        | undefined;
+      if (ctx.mode === "tui") {
+        outcome = await ctx.ui.custom((tui, theme, _keybindings, done) => {
+          const loader = new BorderedLoader(tui, theme, `Summarizing temp:${thread.name}…`);
+          loader.onAbort = () => {
+            controller.abort();
+            done(undefined);
+          };
+          summarizeThreadWithPi(request, ctx, controller.signal)
+            .then((result) => done({ action: "summary", result }))
+            .catch((error) => done({ action: "error", error }));
+          return loader;
+        });
+      } else {
+        try {
+          outcome = {
+            action: "summary",
+            result: await summarizeThreadWithPi(request, ctx, controller.signal),
+          };
+        } catch (error) {
+          outcome = { action: "error", error };
+        }
+      }
+
+      const stale = generation !== lifecycleGeneration
+        || runtimeInvalidated
+        || (generation === lifecycleGeneration
+          && (ctx.sessionManager.getSessionFile() !== sessionFile || ctx.sessionManager.getLeafId() !== leafId));
+      if (stale || controller.signal.aborted || !outcome) return { action: "cancelled", stale };
+      return outcome;
+    } finally {
+      if (activeLifecycleController === controller) activeLifecycleController = undefined;
+    }
+  }
+
+  async function requestRouteDecision(
+    prompt: string,
+    hasImages: boolean,
+    ctx: ExtensionContext,
+    signal?: AbortSignal,
+  ): Promise<Awaited<ReturnType<typeof decideRoute>>> {
+    if (!routeClient || !config.enabled || !isConfigured(config)) return undefined;
+    const sessionMessages = getSessionMessages(ctx);
+    return decideRoute(routeClient, {
+      prompt,
+      hasImages,
+      originContext: getOriginContext(sessionMessages, config.routerContextMessages),
+      threads: [...threads.values()],
+      config,
+      ...(signal ? { signal } : {}),
+      ...(lastVisibleRoute
+        ? {
+            lastVisibleRoute: {
+              threadId: lastVisibleRoute.threadId,
+              threadName: lastVisibleRoute.threadName,
+              tier: lastVisibleRoute.tier,
+              model: `${lastVisibleRoute.provider}/${lastVisibleRoute.modelId}`,
+            },
+          }
+        : {}),
+    });
+  }
+
+  function restorePromotionAfterCancellation(payload: PendingPromotion, ctx: ExtensionCommandContext): void {
+    threads.set(payload.thread.id, payload.thread);
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "thread-created",
+      thread: payload.thread,
+    } satisfies RouterSessionEntryData);
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "promotion-completed",
+      token: payload.token,
+      outcome: "cancelled",
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    ctx.ui.setEditorText(payload.prompt);
+    ctx.ui.notify("Promotion cancelled; the pending message was restored to the editor", "info");
+  }
+
+  async function promotePending(ctx: ExtensionCommandContext, token: string): Promise<void> {
+    const payload = pendingPromotions.get(token);
+    if (!payload) {
+      ctx.ui.notify("The pending temp-thread promotion is no longer available", "error");
+      return;
+    }
+    pendingPromotions.delete(token);
+    threads.delete(payload.thread.id);
+    lastVisibleRoute = undefined;
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "promotion-pending",
+      token: payload.token,
+      thread: payload.thread,
+      pendingPrompt: payload.prompt,
+      pendingImageCount: payload.images?.length ?? 0,
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "lifecycle-completed",
+      token: payload.lifecycleToken,
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "thread-retired",
+      threadId: payload.thread.id,
+      threadName: payload.thread.name,
+      reason: "promoted",
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+
+    let replacementStarted = false;
+    try {
+      const result = await ctx.newSession({
+        ...(payload.parentSession ? { parentSession: payload.parentSession } : {}),
+        setup: async (sessionManager) => {
+          for (const message of payload.messages) {
+            sessionManager.appendMessage(message as Parameters<typeof sessionManager.appendMessage>[0]);
+          }
+          sessionManager.appendSessionInfo(`Promoted: ${payload.thread.name}`);
+          sessionManager.appendCustomEntry(SWITCHYARD_ENTRY_TYPE, {
+            kind: "promoted-session",
+            token: payload.token,
+            ...(payload.parentSession ? { sourceSession: payload.parentSession } : {}),
+            ...(payload.sourceEntryId ? { sourceEntryId: payload.sourceEntryId } : {}),
+            sourceThreadId: payload.thread.id,
+            sourceThreadName: payload.thread.name,
+            pendingPrompt: payload.prompt,
+            pendingImageCount: payload.images?.length ?? 0,
+          } satisfies RouterSessionEntryData);
+        },
+        withSession: async (newContext) => {
+          replacementStarted = true;
+          const childSession = newContext.sessionManager.getSessionFile();
+          if (payload.parentSession && childSession && existsSync(childSession)) {
+            try {
+              SessionManager.open(payload.parentSession).appendCustomEntry(SWITCHYARD_ENTRY_TYPE, {
+                kind: "promotion-completed",
+                token: payload.token,
+                ...(childSession ? { childSession } : {}),
+                outcome: "completed",
+                timestamp: new Date().toISOString(),
+              } satisfies RouterSessionEntryData);
+            } catch {
+              // The child is already valid; leaving the durable pending marker lets the source recover safely.
+            }
+          }
+          try {
+            await newContext.sendUserMessage([
+              { type: "text", text: payload.prompt },
+              ...(payload.images ?? []),
+            ], { expandPromptTemplates: true });
+          } catch (error) {
+            newContext.ui.setEditorText(payload.prompt);
+            const imageNote = payload.images?.length
+              ? ` Reattach ${payload.images.length} image(s) before resubmitting.`
+              : "";
+            newContext.ui.notify(
+              `The child session was created, but its pending message could not be submitted: ${error instanceof Error ? error.message : String(error)}.${imageNote}`,
+              "error",
+            );
+          }
+        },
+      });
+      if (result.cancelled) restorePromotionAfterCancellation(payload, ctx);
+    } catch (error) {
+      if (!replacementStarted && !runtimeInvalidated) {
+        restorePromotionAfterCancellation(payload, ctx);
+        ctx.ui.notify(
+          `Could not promote temp:${payload.thread.name}: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
+    }
   }
 
   pi.registerTool({
@@ -303,12 +599,33 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
         clearDebugStatus(ctx);
       }
     },
+    promotePending,
   });
 
   pi.on("session_start", (_event, ctx) => {
+    runtimeInvalidated = false;
     config = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     restoreBranchState(ctx);
     ensureTempTreeLabels(ctx);
+    if (recoverableLifecycle && ctx.hasUI) {
+      ctx.ui.setEditorText(recoverableLifecycle.prompt);
+      const imageNote = recoverableLifecycle.imageCount > 0
+        ? ` Reattach ${recoverableLifecycle.imageCount} image(s) before resubmitting.`
+        : "";
+      ctx.ui.notify(`Recovered a message from an interrupted temp-thread lifecycle action.${imageNote}`, "warning");
+    } else if (recoverablePromotion && ctx.hasUI) {
+      ctx.ui.setEditorText(recoverablePromotion.prompt);
+      const imageNote = recoverablePromotion.imageCount > 0
+        ? ` Reattach ${recoverablePromotion.imageCount} image(s) before resubmitting.`
+        : "";
+      ctx.ui.notify(`Recovered a message from an interrupted temp-thread promotion.${imageNote}`, "warning");
+    } else if (forcePromotedPrompt && ctx.hasUI) {
+      ctx.ui.setEditorText(forcePromotedPrompt.prompt);
+      const imageNote = forcePromotedPrompt.imageCount > 0
+        ? ` Reattach ${forcePromotedPrompt.imageCount} image(s) before resubmitting.`
+        : "";
+      ctx.ui.notify(`Recovered an unsubmitted message in this promoted child session.${imageNote}`, "warning");
+    }
     routeClient = undefined;
     setOriginContextToolEnabled(false);
 
@@ -335,7 +652,16 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("session_before_switch", () => {
+    invalidateLifecycle();
+  });
+
+  pi.on("session_before_fork", () => {
+    invalidateLifecycle();
+  });
+
   pi.on("session_before_tree", async (event, ctx) => {
+    invalidateLifecycle();
     const outcome = await summarizeOriginBranch(
       {
         entriesToSummarize: event.preparation.entriesToSummarize,
@@ -464,7 +790,211 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     pendingCompactionFileLists = undefined;
   });
 
+  async function handleInput(event: InputEvent, ctx: ExtensionContext): Promise<InputEventResult> {
+    if (event.source === "extension" || event.streamingBehavior) {
+      pendingRouteDecision = undefined;
+      return { action: "continue" as const };
+    }
+    if (recoverableLifecycle) {
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+        kind: "lifecycle-completed",
+        token: recoverableLifecycle.token,
+        timestamp: new Date().toISOString(),
+      } satisfies RouterSessionEntryData);
+      recoverableLifecycle = undefined;
+    }
+    if (recoverablePromotion) {
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+        kind: "thread-created",
+        thread: recoverablePromotion.thread,
+      } satisfies RouterSessionEntryData);
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+        kind: "promotion-completed",
+        token: recoverablePromotion.token,
+        outcome: "cancelled",
+        timestamp: new Date().toISOString(),
+      } satisfies RouterSessionEntryData);
+      recoverablePromotion = undefined;
+    }
+
+    if (!routeClient || !config.enabled || !isConfigured(config)) return { action: "continue" as const };
+
+    const identity = captureRequestIdentity(ctx);
+    const hasImages = (event.images?.length ?? 0) > 0;
+    const routeController = new AbortController();
+    activeLifecycleController = routeController;
+    let decision: Awaited<ReturnType<typeof decideRoute>>;
+    try {
+      decision = await requestRouteDecision(event.text, hasImages, ctx, routeController.signal);
+    } finally {
+      if (activeLifecycleController === routeController) activeLifecycleController = undefined;
+    }
+    if (!requestIdentityIsCurrent(identity, ctx) || routeController.signal.aborted) {
+      pendingRouteDecision = undefined;
+      restoreHeldPromptIfCurrent(identity, event, ctx);
+      return { action: "handled" as const };
+    }
+    pendingRouteDecision = {
+      prompt: event.text,
+      imageFingerprint: fingerprintImages(event.images),
+      decision,
+    };
+    if (!decision) return { action: "continue" as const };
+
+    if (decision.target === "origin" || decision.target === "new_temp_from_origin") {
+      return { action: "continue" as const };
+    }
+    const targetThread = threads.get(decision.target);
+    if (!targetThread) return { action: "continue" as const };
+    const budget = projectTempThreadBudget(
+      ctx.sessionManager.getBranch(),
+      targetThread,
+      event.text,
+      event.images,
+      config,
+    );
+    if (!budget.exceeded || !ctx.hasUI) return { action: "continue" as const };
+
+    const lifecycleToken = uuidv7().replaceAll("-", "");
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "lifecycle-pending",
+      token: lifecycleToken,
+      pendingPrompt: event.text,
+      pendingImageCount: event.images?.length ?? 0,
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+
+    const selectionIdentity = captureRequestIdentity(ctx);
+    const reasons = [
+      budget.tokenLimitExceeded ? `${budget.tokens.toLocaleString()} estimated tokens` : undefined,
+      budget.turnLimitExceeded ? `${budget.turns} user turns` : undefined,
+    ].filter((value): value is string => value !== undefined).join(" and ");
+    const canPromote = ctx.sessionManager.getSessionFile() !== undefined && ctx.model !== undefined;
+    const choices = [
+      ...(canPromote ? ["Promote to a child session"] : []),
+      "Summarize into origin",
+      "Cancel and restore the message",
+    ];
+    const choice = await ctx.ui.select(
+      `Temp thread “${targetThread.name}” is getting long (${reasons}). What do you want to do?`,
+      choices,
+    );
+    if (!requestIdentityIsCurrent(selectionIdentity, ctx)) {
+      pendingRouteDecision = undefined;
+      restoreHeldPromptIfCurrent(selectionIdentity, event, ctx);
+      return { action: "handled" as const };
+    }
+
+    if (!choice || choice === "Cancel and restore the message") {
+      pendingRouteDecision = undefined;
+      ctx.ui.setEditorText(event.text);
+      const imageNote = hasImages ? ` Reattach ${event.images?.length ?? 0} image(s) before resubmitting.` : "";
+      ctx.ui.notify(`Pending message restored to the editor.${imageNote}`, "info");
+      return { action: "handled" as const };
+    }
+
+    if (choice === "Promote to a child session") {
+      const token = uuidv7().replaceAll("-", "");
+      const branch = ctx.sessionManager.getBranch();
+      const parentSession = ctx.sessionManager.getSessionFile();
+      const sourceEntryId = findThreadBranchPoint(branch, targetThread.id);
+      pendingPromotions.set(token, {
+        token,
+        lifecycleToken,
+        prompt: event.text,
+        ...(event.images ? { images: [...event.images] } : {}),
+        thread: { ...targetThread, seedContext: [...targetThread.seedContext] },
+        messages: ensurePromotionMessagesDurable(
+          messagesForPromotedSession(branch, targetThread),
+          ctx.model!,
+        ),
+        ...(parentSession !== undefined ? { parentSession } : {}),
+        ...(sourceEntryId !== undefined ? { sourceEntryId } : {}),
+      });
+      pendingRouteDecision = undefined;
+      ctx.ui.setEditorText(event.text);
+      setTimeout(() => {
+        try {
+          pi.sendUserMessage(`/switchyard __promote ${token}`, { expandPromptTemplates: true });
+        } catch {
+          pendingPromotions.delete(token);
+        }
+      }, 0);
+      return { action: "handled" as const };
+    }
+
+    try {
+      const summaryOutcome = await summarizeTempForLifecycle(targetThread, ctx);
+      if (summaryOutcome.action === "cancelled") {
+        pendingRouteDecision = undefined;
+        if (!summaryOutcome.stale) {
+          ctx.ui.setEditorText(event.text);
+          ctx.ui.notify("Temp-thread summarization cancelled; the pending message was restored", "info");
+        }
+        return { action: "handled" as const };
+      }
+      if (summaryOutcome.action === "error") throw summaryOutcome.error;
+      const summary = summaryOutcome.result;
+      const handoffOperationId = uuidv7();
+      pi.sendMessage({
+        customType: "switchyard-handoff",
+        content: formatTempThreadHandoff(targetThread, summary.summary),
+        display: true,
+        details: {
+          switchyardHandoff: {
+            operationId: handoffOperationId,
+            sourceThreadId: targetThread.id,
+            sourceThreadName: targetThread.name,
+            usage: summary.usage,
+          },
+        },
+      });
+      const handoffPersisted = ctx.sessionManager.getBranch().some((entry) =>
+        entry.type === "custom_message"
+        && entry.customType === "switchyard-handoff"
+        && entry.details
+        && typeof entry.details === "object"
+        && (entry.details as Record<string, unknown>).switchyardHandoff
+        && typeof (entry.details as Record<string, unknown>).switchyardHandoff === "object"
+        && ((entry.details as Record<string, unknown>).switchyardHandoff as Record<string, unknown>).operationId
+          === handoffOperationId);
+      if (!handoffPersisted) {
+        throw new Error("The origin handoff could not be persisted");
+      }
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+        kind: "lifecycle-completed",
+        token: lifecycleToken,
+        timestamp: new Date().toISOString(),
+      } satisfies RouterSessionEntryData);
+      threads.delete(targetThread.id);
+      lastVisibleRoute = undefined;
+      pendingRouteDecision = undefined;
+      originFallbackForNext = true;
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+        kind: "thread-retired",
+        threadId: targetThread.id,
+        threadName: targetThread.name,
+        reason: "summarized-to-origin",
+        timestamp: new Date().toISOString(),
+      } satisfies RouterSessionEntryData);
+      return handleInput(event, ctx);
+    } catch (error) {
+      pendingRouteDecision = undefined;
+      ctx.ui.setEditorText(event.text);
+      ctx.ui.notify(
+        `Could not complete the handoff for temp:${targetThread.name}; the pending message was restored: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+      return { action: "handled" as const };
+    }
+  }
+
+  pi.on("input", handleInput);
+
   pi.on("before_agent_start", async (event, ctx) => {
+    const hasImages = (event.images?.length ?? 0) > 0;
+    const preflight = pendingRouteDecision;
+    pendingRouteDecision = undefined;
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
     pendingThreadCreated = undefined;
@@ -477,23 +1007,27 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     }
 
     const sessionMessages = getSessionMessages(ctx);
-    const decision = await decideRoute(routeClient, {
-      prompt: event.prompt,
-      hasImages: (event.images?.length ?? 0) > 0,
-      originContext: getOriginContext(sessionMessages, config.routerContextMessages),
-      threads: [...threads.values()],
-      config,
-      ...(lastVisibleRoute
-        ? {
-            lastVisibleRoute: {
-              threadId: lastVisibleRoute.threadId,
-              threadName: lastVisibleRoute.threadName,
-              tier: lastVisibleRoute.tier,
-              model: `${lastVisibleRoute.provider}/${lastVisibleRoute.modelId}`,
-            },
-          }
-        : {}),
-    });
+    let decision = preflight
+      ? preflight.decision
+      : await requestRouteDecision(event.prompt, hasImages, ctx);
+    if (
+      decision
+      && preflight
+      && (preflight.prompt !== event.prompt
+        || preflight.imageFingerprint !== fingerprintImages(event.images))
+    ) {
+      // Pi expands skills/templates and later input handlers may transform text/images after our input hook.
+      // The transformed request has not passed a temp budget check, so keep it in origin.
+      decision = { ...decision, target: "origin" };
+    }
+    const promotedPrompt = forcePromotedPrompt
+      ?? findPendingPromotedPrompt(ctx.sessionManager.getBranch());
+    const forceOrigin = promotedPrompt !== undefined;
+    if (promotedPrompt) {
+      pendingPromotedToConsume = { token: promotedPrompt.token, prompt: promotedPrompt.prompt };
+      forcePromotedPrompt = undefined;
+    }
+    if (decision && forceOrigin) decision = { ...decision, target: "origin" };
 
     // Jev unavailable, timed out, or returned an unusable answer: Pi proceeds untouched.
     if (!decision) {
@@ -501,14 +1035,14 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    const resolved = resolveTierModel(ctx, config, decision.tier, (event.images?.length ?? 0) > 0);
+    const resolved = resolveTierModel(ctx, config, decision.tier, hasImages);
     if (!resolved) {
       clearDebugStatus(ctx);
       return;
     }
 
     let targetThread: TempThread | undefined;
-    if (decision.target === "new_temp") {
+    if (decision.target === "new_temp_from_origin") {
       targetThread = createTempThread(
         event.prompt,
         getOriginContext(sessionMessages, config.initialOriginMessages),
@@ -544,6 +1078,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       thinking: resolved.tierConfig.thinking,
       decision: { ...decision, tier: resolved.tier },
     };
+    originFallbackForNext = false;
     lastVisibleRoute = activeRoute;
     pendingRoutePrompt = event.prompt;
     setOriginContextToolEnabled(activeRoute.threadId !== "origin");
@@ -582,7 +1117,10 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("context", (event, ctx) => {
-    if (!activeRoute) return;
+    if (!activeRoute) {
+      if (originFallbackForNext) return { messages: filterMessagesForOrigin(event.messages) };
+      return;
+    }
     if (activeRoute.threadId === "origin") {
       return { messages: filterMessagesForOrigin(event.messages) };
     }
@@ -592,7 +1130,17 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("message_start", (event, ctx) => {
-    if (event.message.role !== "assistant" || routeMetadataPersisted || !activeRoute || !pendingRoutePrompt) return;
+    if (event.message.role !== "assistant") return;
+    if (pendingPromotedToConsume) {
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+        kind: "promotion-consumed",
+        token: pendingPromotedToConsume.token,
+        pendingPrompt: pendingPromotedToConsume.prompt,
+        timestamp: new Date().toISOString(),
+      } satisfies RouterSessionEntryData);
+      pendingPromotedToConsume = undefined;
+    }
+    if (routeMetadataPersisted || !activeRoute || !pendingRoutePrompt) return;
     const leafId = ctx.sessionManager.getLeafId();
     const leaf = leafId ? ctx.sessionManager.getEntry(leafId) : undefined;
     if (activeRoute.threadId !== "origin" && leaf?.type === "message" && leaf.message.role === "user") {
@@ -622,15 +1170,21 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     activeRoute = undefined;
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingRouteDecision = undefined;
+    originFallbackForNext = false;
     routeMetadataPersisted = false;
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    runtimeInvalidated = true;
+    invalidateLifecycle();
     setOriginContextToolEnabled(false);
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingRouteDecision = undefined;
+    originFallbackForNext = false;
     routeMetadataPersisted = false;
     routeClient = undefined;
     clearDebugStatus(ctx);

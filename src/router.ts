@@ -10,6 +10,7 @@ export interface RouteRequest {
   originContext: OriginContextItem[];
   threads: TempThread[];
   config: RouterConfig;
+  signal?: AbortSignal;
   lastVisibleRoute?: {
     threadId: string;
     threadName: string;
@@ -72,14 +73,14 @@ function buildTargetCriteria(threads: readonly TempThread[]): {
     origin: {
       what: "Continue the primary work in the origin conversation.",
       use_when: "The request advances, changes, verifies, or depends directly on the main task, or its result should remain in the origin task's future context.",
-      not_for: "Bounded side questions, status checks, pull-request or branch administration, or unrelated work whose transcript would distract the main task.",
+      not_for: "Bounded side questions, status checks, pull-request or branch administration, unrelated work whose transcript would distract the main task, or requests that require context unique to an existing temp. Continue the relevant temp first; it can later hand its result back to origin.",
       examples: ["Continue implementing the router", "Use the design we agreed on to fix the remaining tests"],
     },
-    new_temp: {
-      what: "Create a new isolated temporary thread seeded with a small snapshot of the origin.",
-      use_when: "The request is a bounded aside, status/admin operation, unrelated question, or independently completable task that does not belong in the origin task's future context.",
-      not_for: "A follow-up to an existing temp thread or a direct continuation of the primary work.",
-      examples: ["Did you create a pull request?", "What branch are we on?", "Explain an unrelated concept"],
+    new_temp_from_origin: {
+      what: "Create a new flat sibling temporary thread seeded only with a small snapshot of the origin conversation.",
+      use_when: "The request is a bounded aside that needs origin context but is independent of facts, conclusions, tool results, and unresolved work unique to every existing temp thread, including the currently visible one.",
+      not_for: "Anything that depends on the currently visible temp thread, a follow-up to another existing temp thread, or a direct continuation of the primary work. If current-temp context is needed, continue that temp even when the request introduces a related subtopic.",
+      examples: ["While a test aside is visible, independently check whether the origin task's README was updated", "What branch are we on?", "Explain an unrelated concept using only origin context"],
     },
   };
   const optionToThreadId = new Map<string, string>();
@@ -91,7 +92,7 @@ function buildTargetCriteria(threads: readonly TempThread[]): {
       original_purpose: sanitizeForRouter(thread.firstPrompt, 1_200),
       latest_user_message: sanitizeForRouter(thread.lastUserText ?? "", 1_200),
       latest_assistant_answer: sanitizeForRouter(thread.lastAssistantText ?? "", 1_200),
-      use_when: "The new request follows up on, confirms, corrects, or continues this specific temporary thread.",
+      use_when: "The new request follows up on, confirms, corrects, continues, or relies on facts, conclusions, tool results, or unresolved work from this specific temporary thread. For the currently visible temp, choose this even when the request opens a related subtopic that could otherwise look like a new aside.",
     };
   }
   return { criteria, optionToThreadId };
@@ -168,15 +169,19 @@ export async function decideRoute(client: RouteClient, request: RouteRequest): P
           ),
         },
       },
-      { timeout: 3_000 },
+      {
+        timeout: 3_000,
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const targetAnswer = response.answers.target;
     const tierAnswer = response.answers.tier;
     let target = targetAnswer.choice;
     if (targetAnswer.confidence < request.config.targetConfidenceFloor) target = "origin";
+    else if (target === "new_temp") target = "new_temp_from_origin";
     else if (optionToThreadId.has(target)) target = optionToThreadId.get(target) ?? "origin";
-    else if (target !== "origin" && target !== "new_temp") return undefined;
+    else if (target !== "origin" && target !== "new_temp_from_origin") return undefined;
 
     let tier = tierAnswer.choice as TierName;
     if (!TIER_NAMES.includes(tier)) return undefined;

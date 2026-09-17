@@ -61,6 +61,8 @@ test("category menu shows every tier's current model and thinking", () => {
   assert.match(items[0]?.description ?? "", /openai\/gpt-astra.*xhigh/);
   assert.equal(items[1]?.description, "not configured");
   assert.match(items[3]?.description ?? "", /openai\/gpt-luna.*default/);
+  const limits = items.find((item) => item.value === "temp-limits");
+  assert.match(limits?.description ?? "", /32,000 tokens.*12 turns/);
 });
 
 test("Switchyard menu returns after each category change until the root menu is cancelled", async () => {

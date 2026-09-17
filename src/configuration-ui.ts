@@ -65,6 +65,11 @@ export function buildCategoryItems(config: RouterConfig): SelectItem[] {
       description: String(config.enabled),
     },
     {
+      value: "temp-limits",
+      label: "temp thread soft limits",
+      description: `${config.tempThreadSoftTokenLimit.toLocaleString()} tokens · ${config.tempThreadSoftTurnLimit} turns`,
+    },
+    {
       value: "show",
       label: "show configuration",
       description: "Display all current settings",
@@ -85,7 +90,12 @@ function modelItems(models: readonly Model<any>[], current?: { provider: string;
 }
 
 function formatConfig(config: RouterConfig): string {
-  const lines = [`enabled: ${config.enabled}`, `debug: ${config.debug}`];
+  const lines = [
+    `enabled: ${config.enabled}`,
+    `debug: ${config.debug}`,
+    `temp thread soft token limit: ${config.tempThreadSoftTokenLimit}`,
+    `temp thread soft turn limit: ${config.tempThreadSoftTurnLimit}`,
+  ];
   for (const tier of TIER_NAMES) {
     const selected = config.tiers[tier];
     lines.push(
@@ -101,6 +111,7 @@ export interface ConfigurationHooks {
   getConfig(): RouterConfig;
   reloadConfig(ctx: ExtensionCommandContext): void;
   onDebugChanged(ctx: ExtensionCommandContext): void;
+  promotePending?(ctx: ExtensionCommandContext, token: string): Promise<void>;
 }
 
 async function chooseScope(ctx: ExtensionCommandContext, title: string): Promise<ConfigScope | undefined> {
@@ -191,6 +202,37 @@ async function editDebug(ctx: ExtensionCommandContext, hooks: ConfigurationHooks
   ctx.ui.notify(`Switchyard debug ${hooks.getConfig().debug ? "enabled" : "disabled"} · ${path}`, "info");
 }
 
+async function editTempLimits(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  const current = hooks.getConfig();
+  const value = await ctx.ui.input(
+    "Temp thread soft limits (tokens,turns; 0 disables a limit)",
+    `${current.tempThreadSoftTokenLimit},${current.tempThreadSoftTurnLimit}`,
+  );
+  if (value === undefined) return;
+  const match = value.trim().match(/^(\d+)\s*,\s*(\d+)$/);
+  if (!match) {
+    ctx.ui.notify("Enter two whole numbers separated by a comma, for example 32000,12", "error");
+    return;
+  }
+  const tokenLimit = Number(match[1]);
+  const turnLimit = Number(match[2]);
+  if (!Number.isSafeInteger(tokenLimit) || !Number.isSafeInteger(turnLimit)) {
+    ctx.ui.notify("Temp thread limits are too large", "error");
+    return;
+  }
+  const scope = await chooseScope(ctx, "Save temp thread soft limits");
+  if (!scope) return;
+  const path = writeConfigPatch(ctx.cwd, scope, {
+    tempThreadSoftTokenLimit: tokenLimit,
+    tempThreadSoftTurnLimit: turnLimit,
+  });
+  finishConfigChange(ctx, hooks);
+  ctx.ui.notify(
+    `Temp limits → ${hooks.getConfig().tempThreadSoftTokenLimit} tokens, ${hooks.getConfig().tempThreadSoftTurnLimit} turns · ${path}`,
+    "info",
+  );
+}
+
 async function editEnabled(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
   const selected = await showPicker(ctx, "Enable Switchyard", [
     { value: "true", label: "enabled" },
@@ -229,7 +271,7 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
       ctx,
       "Choose Switchyard category to change",
       buildCategoryItems(hooks.getConfig()),
-      { maxVisible: 9 },
+      { maxVisible: 10 },
     ),
     async (selected) => {
       if (selected.startsWith("tier:")) {
@@ -238,6 +280,8 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
         await editDebug(ctx, hooks);
       } else if (selected === "enabled") {
         await editEnabled(ctx, hooks);
+      } else if (selected === "temp-limits") {
+        await editTempLimits(ctx, hooks);
       } else if (selected === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       }
@@ -250,18 +294,22 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
     description: "Configure and inspect the Switchyard session/model router",
     handler: async (args, ctx) => {
       const direct = args.trim().toLowerCase();
-      if ((TIER_NAMES as readonly string[]).includes(direct)) {
+      if (direct.startsWith("__promote ")) {
+        await hooks.promotePending?.(ctx, direct.slice("__promote ".length).trim());
+      } else if ((TIER_NAMES as readonly string[]).includes(direct)) {
         await editTier(ctx, hooks, direct as TierName);
       } else if (!direct || direct === "configure") {
         await showCategoryMenu(ctx, hooks);
       } else if (direct === "debug") {
         await editDebug(ctx, hooks);
+      } else if (direct === "limits") {
+        await editTempLimits(ctx, hooks);
       } else if (direct === "on" || direct === "off") {
         await saveEnabled(ctx, hooks, direct === "on");
       } else if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       } else {
-        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|limits|on|off|show]", "error");
       }
     },
   });

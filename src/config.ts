@@ -14,6 +14,8 @@ export const DEFAULT_CONFIG: RouterConfig = {
   initialOriginMessages: 5,
   targetConfidenceFloor: 0.15,
   tierConfidenceFloor: 0.45,
+  tempThreadSoftTokenLimit: 32_000,
+  tempThreadSoftTurnLimit: 12,
 };
 
 export type ConfigScope = "global" | "project";
@@ -81,6 +83,16 @@ function normalizePartial(value: unknown): Partial<RouterConfig> {
   }
   if (typeof input.tierConfidenceFloor === "number") {
     result.tierConfidenceFloor = Math.max(0, Math.min(1, input.tierConfidenceFloor));
+  }
+  if (typeof input.tempThreadSoftTokenLimit === "number") {
+    result.tempThreadSoftTokenLimit = input.tempThreadSoftTokenLimit <= 0
+      ? 0
+      : Math.max(1_000, Math.min(1_000_000, Math.trunc(input.tempThreadSoftTokenLimit)));
+  }
+  if (typeof input.tempThreadSoftTurnLimit === "number") {
+    result.tempThreadSoftTurnLimit = input.tempThreadSoftTurnLimit <= 0
+      ? 0
+      : Math.max(1, Math.min(1_000, Math.trunc(input.tempThreadSoftTurnLimit)));
   }
   return result;
 }

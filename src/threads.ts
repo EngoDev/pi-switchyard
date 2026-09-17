@@ -79,7 +79,9 @@ export function toOriginContextItem(message: AgentMessage): OriginContextItem | 
 export function getOriginContext(messages: readonly AgentMessage[], limit: number): OriginContextItem[] {
   return messages
     .filter((message) => !getRouterMetadata(message))
-    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter((message) => message.role === "user"
+      || message.role === "assistant"
+      || (message.role === "custom" && message.customType === "switchyard-handoff"))
     .map(toOriginContextItem)
     .filter((item): item is OriginContextItem => item !== undefined)
     .slice(-limit);
@@ -152,11 +154,23 @@ export function updateThreadFromMessage(thread: TempThread, message: AgentMessag
 
 export function restoreThreads(entries: readonly SessionEntry[]): Map<string, TempThread> {
   const threads = new Map<string, TempThread>();
+  const recoverablePromotions = new Map<string, TempThread>();
   for (const entry of entries) {
     if (entry.type !== "custom" || (entry.customType !== "switchyard" && entry.customType !== "jev-router")) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
     if (data?.kind === "thread-created") threads.set(data.thread.id, { ...data.thread });
+    if (data?.kind === "promotion-pending") recoverablePromotions.set(data.token, { ...data.thread });
+    if (data?.kind === "promotion-completed") recoverablePromotions.delete(data.token);
+    if (data?.kind === "thread-retired") {
+      threads.delete(data.threadId);
+      if (data.reason !== "promoted") {
+        for (const [token, pending] of recoverablePromotions) {
+          if (pending.id === data.threadId) recoverablePromotions.delete(token);
+        }
+      }
+    }
   }
+  for (const thread of recoverablePromotions.values()) threads.set(thread.id, thread);
   for (const entry of entries) {
     if (entry.type !== "message") continue;
     const threadId = getRouterMetadata(entry.message)?.threadId;
@@ -194,7 +208,7 @@ export function filterMessagesForOrigin(messages: readonly AgentMessage[]): Agen
   return messages.filter((message) => !getRouterMetadata(message));
 }
 
-function isReplayableThreadMessage(message: AgentMessage): boolean {
+export function isReplayableThreadMessage(message: AgentMessage): boolean {
   return message.role !== "assistant"
     || (message.stopReason !== "error" && message.stopReason !== "aborted" && message.stopReason !== "length");
 }
@@ -234,6 +248,124 @@ export function threadContextFromEntries(
   const messages = messagesFromEntries(entries)
     .filter(isReplayableThreadMessage);
   return filterMessagesForThread(messages, thread);
+}
+
+export function messagesForPromotedSession(
+  entries: readonly SessionEntry[],
+  thread: TempThread,
+): AgentMessage[] {
+  const messages = messagesFromEntries(entries)
+    .filter((message) => getRouterMetadata(message)?.threadId === thread.id)
+    .filter(isReplayableThreadMessage);
+  return filterMessagesForThread(messages, thread).map((message) => {
+    const tagged = message as TaggedAgentMessage;
+    const { switchyard: _switchyard, jevRouter: _jevRouter, ...untagged } = tagged;
+    if (untagged.role !== "custom" || !untagged.details || typeof untagged.details !== "object") {
+      return untagged as AgentMessage;
+    }
+    const details = { ...(untagged.details as Record<string, unknown>) };
+    delete details.switchyard;
+    delete details.jevRouter;
+    return { ...untagged, details } as AgentMessage;
+  });
+}
+
+export function findThreadBranchPoint(
+  entries: readonly SessionEntry[],
+  threadId: string,
+): string | undefined {
+  for (const entry of entries) {
+    if (entry.type === "message" && getRouterMetadata(entry.message)?.threadId === threadId) {
+      return entry.parentId ?? undefined;
+    }
+  }
+  return undefined;
+}
+
+export function findRecoverableLifecycle(entries: readonly SessionEntry[]): {
+  token: string;
+  prompt: string;
+  imageCount: number;
+} | undefined {
+  const pending = new Map<string, { token: string; prompt: string; imageCount: number }>();
+  for (const entry of entries) {
+    if (entry.type === "message" && entry.message.role === "user" && pending.size > 0) {
+      pending.clear();
+      continue;
+    }
+    if (entry.type !== "custom" || (entry.customType !== "switchyard" && entry.customType !== "jev-router")) continue;
+    const data = entry.data as RouterSessionEntryData | undefined;
+    if (data?.kind === "lifecycle-pending") {
+      pending.set(data.token, {
+        token: data.token,
+        prompt: data.pendingPrompt,
+        imageCount: data.pendingImageCount,
+      });
+    }
+    if (data?.kind === "lifecycle-completed") pending.delete(data.token);
+  }
+  return [...pending.values()].at(-1);
+}
+
+export function findRecoverablePromotion(entries: readonly SessionEntry[]): {
+  token: string;
+  thread: TempThread;
+  prompt: string;
+  imageCount: number;
+} | undefined {
+  const pending = new Map<string, {
+    token: string;
+    thread: TempThread;
+    prompt: string;
+    imageCount: number;
+  }>();
+  for (const entry of entries) {
+    if (entry.type !== "custom" || (entry.customType !== "switchyard" && entry.customType !== "jev-router")) continue;
+    const data = entry.data as RouterSessionEntryData | undefined;
+    if (data?.kind === "promotion-pending") {
+      pending.set(data.token, {
+        token: data.token,
+        thread: data.thread,
+        prompt: data.pendingPrompt,
+        imageCount: data.pendingImageCount,
+      });
+    }
+    if (data?.kind === "promotion-completed") pending.delete(data.token);
+    if (data?.kind === "thread-retired") {
+      if (data.reason !== "promoted") {
+        for (const [token, promotion] of pending) {
+          if (promotion.thread.id === data.threadId) pending.delete(token);
+        }
+      }
+    }
+  }
+  return [...pending.values()].at(-1);
+}
+
+export function findPendingPromotedPrompt(entries: readonly SessionEntry[]): {
+  token: string;
+  prompt: string;
+  imageCount: number;
+} | undefined {
+  let pending: { token: string; prompt: string; imageCount: number } | undefined;
+  for (const entry of entries) {
+    if (entry.type === "message" && entry.message.role === "user" && pending) {
+      pending = undefined;
+      continue;
+    }
+    if (entry.type !== "custom" || (entry.customType !== "switchyard" && entry.customType !== "jev-router")) continue;
+    const data = entry.data as RouterSessionEntryData | undefined;
+    if (data?.kind === "promoted-session") {
+      pending = {
+        token: typeof data.token === "string" ? data.token : `legacy-${entry.id}`,
+        prompt: data.pendingPrompt,
+        imageCount: typeof data.pendingImageCount === "number" ? data.pendingImageCount : 0,
+      };
+    }
+    if (data?.kind === "promotion-consumed" && pending?.token === data.token) pending = undefined;
+    if (data?.kind === "route") pending = undefined;
+  }
+  return pending;
 }
 
 export function findMissingTempLabels(

@@ -51,6 +51,27 @@ test("origin context excludes tagged temp prompts and assistant answers", () => 
   assert.deepEqual(filterMessagesForOrigin(messages).map((message) => message.timestamp), [1, 2]);
 });
 
+test("origin routing context includes Switchyard handoffs but not unrelated custom messages", () => {
+  const handoff: AgentMessage = {
+    role: "custom",
+    customType: "switchyard-handoff",
+    content: "Summary returned from temp",
+    display: true,
+    timestamp: 3,
+  };
+  const unrelated: AgentMessage = {
+    role: "custom",
+    customType: "other-extension",
+    content: "unrelated injected context",
+    display: false,
+    timestamp: 4,
+  };
+  assert.deepEqual(
+    getOriginContext([user("main", 1), handoff, unrelated], 5).map((item) => item.text),
+    ["main", "Summary returned from temp"],
+  );
+});
+
 test("temp context contains a seed snapshot and only its own messages", () => {
   const thread: TempThread = {
     id: "t1",
