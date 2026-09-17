@@ -34,6 +34,7 @@ import {
   ORIGIN_CONTEXT_ROLES,
   selectOriginContext,
 } from "./origin-context.js";
+import { summarizeOriginBranch } from "./tree-summary.js";
 import {
   createTempThread,
   filterMessagesForOrigin,
@@ -157,21 +158,25 @@ async function summarizeThreadWithPi(
   ctx: ExtensionContext,
   signal: AbortSignal,
 ): Promise<OriginSummaryResult> {
-  if (!ctx.model) throw new Error("No model is available for origin-only compaction");
+  if (!ctx.model) throw new Error("No model is available for thread-aware summarization");
   const conversation = serializeConversation(convertToLlm(request.messages));
   const previousLabel = request.scope.kind === "origin" ? "Previous origin summary" : "Previous temp-thread summary";
   const previous = request.previousSummary
     ? `\n\n## ${previousLabel}\n${request.previousSummary}`
     : "";
-  const custom = request.customInstructions
-    ? `\n\n## User focus instructions\n${request.customInstructions}`
-    : "";
   const scopeName = request.scope.kind === "origin"
     ? "origin conversation"
     : `temp thread ${request.scope.threadName}`;
-  const prompt = `Create a structured continuation summary for the ${scopeName} only.
+  const standardInstructions = `Create a structured continuation summary for the ${scopeName} only.\n\nCapture its goal, constraints, progress, decisions, files, blockers, and next steps.`;
+  const mainInstructions = request.replaceInstructions && request.customInstructions
+    ? request.customInstructions
+    : standardInstructions;
+  const custom = !request.replaceInstructions && request.customInstructions
+    ? `\n\n## User focus instructions\n${request.customInstructions}`
+    : "";
+  const prompt = `${mainInstructions}
 
-Capture its goal, constraints, progress, decisions, files, blockers, and next steps. Do not continue the conversation. Messages from other logical threads have already been removed; do not infer or add unrelated work.${previous}${custom}
+Do not continue the conversation. Messages from other logical threads have already been removed; do not infer or add unrelated work.${previous}${custom}
 
 <thread-conversation>\n${conversation}\n</thread-conversation>`;
   const response = await ctx.modelRegistry.complete(
@@ -191,7 +196,7 @@ Capture its goal, constraints, progress, decisions, files, blockers, and next st
     },
   );
   if (response.stopReason === "error" || response.stopReason === "aborted" || response.stopReason === "length") {
-    throw new Error(response.errorMessage ?? `Origin compaction stopped with ${response.stopReason}`);
+    throw new Error(response.errorMessage ?? `Thread-aware summarization stopped with ${response.stopReason}`);
   }
   const summary = response.content
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
@@ -328,6 +333,32 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       routeClient = undefined;
       clearDebugStatus(ctx);
     }
+  });
+
+  pi.on("session_before_tree", async (event, ctx) => {
+    const outcome = await summarizeOriginBranch(
+      {
+        entriesToSummarize: event.preparation.entriesToSummarize,
+        userWantsSummary: event.preparation.userWantsSummary,
+        customInstructions: event.preparation.customInstructions,
+        replaceInstructions: event.preparation.replaceInstructions,
+      },
+      (request) => summarizeThreadWithPi(request, ctx, event.signal),
+    );
+    if (outcome.action === "default") return;
+    if (outcome.action === "cancel") {
+      if (!event.signal.aborted) {
+        ctx.ui.notify(`Origin-only tree summary cancelled: ${outcome.reason}`, "error");
+      }
+      return { cancel: true };
+    }
+    if (config.debug) {
+      ctx.ui.notify(
+        `Origin-only tree summary excluded ${outcome.summary.details.switchyard.excludedTempMessages} temp message(s)`,
+        "info",
+      );
+    }
+    return { summary: outcome.summary };
   });
 
   pi.on("session_tree", (_event, ctx) => {

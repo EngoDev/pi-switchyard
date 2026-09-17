@@ -134,4 +134,14 @@ The extension intercepts manual and automatic compaction when the summarized spa
 
 Compaction remains logical: old temp entries stay in the session JSONL for recovery and `/tree`, but they are not included in the origin summary or origin provider context.
 
-`/tree` branch summaries are not yet thread-aware; avoid requesting a branch summary when navigating away from a branch containing mixed origin/temp work.
+## Thread-aware tree summaries
+
+When `/tree` navigation summarizes an abandoned branch:
+
+- Navigation without a requested summary remains untouched.
+- Origin-only branches delegate to Pi's default branch summarizer.
+- Mixed branches generate a summary from origin entries only, including origin file tracking.
+- An all-temp abandoned branch records only that no origin work was present.
+- Temp messages remain on their original branch and are never copied into the origin branch summary.
+- Custom and replacement summary instructions are preserved.
+- If origin summarization fails, navigation is cancelled rather than falling back to a mixed summary; retry and choose no summary if you still want to navigate.

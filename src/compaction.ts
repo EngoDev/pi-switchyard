@@ -25,6 +25,7 @@ export interface OriginSummaryRequest {
   messages: AgentMessage[];
   previousSummary: string | undefined;
   customInstructions: string | undefined;
+  replaceInstructions?: boolean;
 }
 
 export interface OriginSummaryResult {
@@ -153,7 +154,7 @@ export function collectOriginFileLists(
   };
 }
 
-function appendFileLists(
+export function appendFileLists(
   summary: string,
   fileLists: { readFiles: string[]; modifiedFiles: string[] },
 ): string {
