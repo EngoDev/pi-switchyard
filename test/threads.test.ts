@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   filterMessagesForOrigin,
   filterMessagesForThread,
+  findCurrentModelEpochUsage,
   findLastRouteForThread,
   findMissingTempLabels,
   getOriginContext,
@@ -249,6 +250,7 @@ test("per-thread incumbent routes are reconstructed independently", () => {
         modelId: tier,
         thinking: "default" as const,
         decision: {
+          requestId: `request-${id}`,
           target: threadId,
           tier,
           targetConfidence: 1,
@@ -266,7 +268,205 @@ test("per-thread incumbent routes are reconstructed independently", () => {
     routeEntry("temp-route", "t1", "cheap"),
   ];
   assert.equal(findLastRouteForThread(entries, "origin")?.modelId, "smart");
+  assert.equal(findLastRouteForThread(entries, "origin")?.decision.requestId, "request-origin-route");
   assert.equal(findLastRouteForThread(entries, "t1")?.modelId, "cheap");
+});
+
+test("A→B→A starts a fresh cache epoch and ignores A's old cache observations", () => {
+  const route = (id: string, modelId: string) => ({
+    type: "custom" as const,
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    customType: "switchyard",
+    data: {
+      kind: "route" as const,
+      route: {
+        threadId: "origin",
+        threadName: "origin",
+        tier: "smart" as const,
+        provider: "test",
+        modelId,
+        thinking: "high" as const,
+        decision: {
+          target: "origin",
+          tier: "smart" as const,
+          targetConfidence: 1,
+          tierConfidence: 1,
+          targetProbabilities: { origin: 1 },
+          tierProbabilities: { genius: 0, smart: 1, handy: 0, cheap: 0 },
+        },
+      },
+      prompt: "prompt",
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const response = (id: string, modelId: string, cacheRead: number) => ({
+    type: "message" as const,
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    message: {
+      ...assistant("answer", Number(id.replace(/\D/g, "")) || 1),
+      provider: "test",
+      model: modelId,
+      usage: {
+        input: 100,
+        output: 10,
+        cacheRead,
+        cacheWrite: 0,
+        totalTokens: 110 + cacheRead,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  });
+  const entries = [
+    route("route-a1", "A"),
+    response("response-1", "A", 900),
+    route("route-b", "B"),
+    response("response-2", "B", 0),
+    route("route-a2", "A"),
+    response("response-3", "A", 0),
+  ];
+  const usage = findCurrentModelEpochUsage(entries, "origin", "test", "A");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0]?.cacheRead, 0);
+});
+
+test("compaction bounds cache observations to the new origin prefix", () => {
+  const route = {
+    type: "custom" as const,
+    id: "route-a",
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    customType: "switchyard",
+    data: {
+      kind: "route" as const,
+      route: {
+        threadId: "origin",
+        threadName: "origin",
+        tier: "smart" as const,
+        provider: "test",
+        modelId: "A",
+        thinking: "high" as const,
+        decision: {
+          target: "origin",
+          tier: "smart" as const,
+          targetConfidence: 1,
+          tierConfidence: 1,
+          targetProbabilities: { origin: 1 },
+          tierProbabilities: { genius: 0, smart: 1, handy: 0, cheap: 0 },
+        },
+      },
+      prompt: "prompt",
+      timestamp: new Date().toISOString(),
+    },
+  };
+  const response = (id: string, cacheRead: number) => ({
+    type: "message" as const,
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    message: {
+      ...assistant("answer", cacheRead + 1),
+      provider: "test",
+      model: "A",
+      usage: {
+        input: 100,
+        output: 10,
+        cacheRead,
+        cacheWrite: 0,
+        totalTokens: 110 + cacheRead,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  });
+  const compaction = {
+    type: "compaction" as const,
+    id: "compaction",
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    summary: "new origin prefix",
+    firstKeptEntryId: "warm",
+    tokensBefore: 1_000,
+  };
+  const usage = findCurrentModelEpochUsage([
+    route,
+    response("warm", 900),
+    compaction,
+    response("cold", 0),
+  ], "origin", "test", "A");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0]?.cacheRead, 0);
+});
+
+test("an unrelated temp summary does not invalidate another temp's cache epoch", () => {
+  const route = {
+    type: "custom" as const,
+    id: "route-t1",
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    customType: "switchyard",
+    data: {
+      kind: "route" as const,
+      route: {
+        threadId: "t1",
+        threadName: "one",
+        tier: "smart" as const,
+        provider: "test",
+        modelId: "A",
+        thinking: "high" as const,
+        decision: {
+          target: "t1",
+          tier: "smart" as const,
+          targetConfidence: 1,
+          tierConfidence: 1,
+          targetProbabilities: { t1: 1 },
+          tierProbabilities: { genius: 0, smart: 1, handy: 0, cheap: 0 },
+        },
+      },
+      prompt: "prompt",
+      timestamp: new Date().toISOString(),
+    },
+  };
+  const warm = {
+    type: "message" as const,
+    id: "warm-t1",
+    parentId: "route-t1",
+    timestamp: new Date().toISOString(),
+    message: {
+      ...assistant("warm", 1, "t1"),
+      provider: "test",
+      model: "A",
+      usage: {
+        input: 100,
+        output: 10,
+        cacheRead: 900,
+        cacheWrite: 0,
+        totalTokens: 1_010,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  };
+  const unrelated = {
+    type: "compaction" as const,
+    id: "unrelated",
+    parentId: "warm-t1",
+    timestamp: new Date().toISOString(),
+    summary: "origin summary",
+    firstKeptEntryId: "warm-t1",
+    tokensBefore: 1_000,
+    details: {
+      switchyard: {
+        tempThreads: {
+          t2: { threadName: "two", summary: "two", firstKeptEntryId: "warm-t1" },
+        },
+      },
+    },
+  };
+  const usage = findCurrentModelEpochUsage([route, warm, unrelated], "t1", "test", "A");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0]?.cacheRead, 900);
 });
 
 test("thread names are readable and unique", () => {

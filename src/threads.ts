@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type {
@@ -153,28 +154,110 @@ export function updateThreadFromMessage(thread: TempThread, message: AgentMessag
   if (message.role === "assistant") thread.lastAssistantText = text;
 }
 
-export function findLastRouteForThread(
+export function findRouteHistoryForThread(
   entries: readonly SessionEntry[],
   threadId: string,
-): ActiveRoute | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
+): ActiveRoute[] {
+  const routes: ActiveRoute[] = [];
+  for (const entry of entries) {
     if (
-      entry?.type !== "custom"
+      entry.type !== "custom"
       || (entry.customType !== "switchyard" && entry.customType !== "jev-router")
     ) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
     if (data?.kind !== "route") continue;
     const routeThreadId = data.route.threadId === ("parent" as string) ? "origin" : data.route.threadId;
-    if (routeThreadId === threadId) {
-      return {
-        ...data.route,
-        threadId: routeThreadId,
-        threadName: routeThreadId === "origin" ? "origin" : data.route.threadName,
-      };
-    }
+    if (routeThreadId !== threadId) continue;
+    routes.push({
+      ...data.route,
+      threadId: routeThreadId,
+      threadName: routeThreadId === "origin" ? "origin" : data.route.threadName,
+    });
   }
-  return undefined;
+  return routes;
+}
+
+export function findLastRouteForThread(
+  entries: readonly SessionEntry[],
+  threadId: string,
+): ActiveRoute | undefined {
+  return findRouteHistoryForThread(entries, threadId).at(-1);
+}
+
+function summaryAffectsThread(entry: SessionEntry, threadId: string): boolean {
+  if (entry.type === "branch_summary") return threadId === "origin";
+  if (entry.type !== "compaction") return false;
+  if (threadId === "origin") return true;
+  if (!entry.details || typeof entry.details !== "object") return false;
+  const details = entry.details as Record<string, unknown>;
+  const router = details.switchyard ?? details.jevRouter;
+  if (!router || typeof router !== "object") return false;
+  const tempThreads = (router as Record<string, unknown>).tempThreads;
+  return Boolean(tempThreads && typeof tempThreads === "object" && threadId in tempThreads);
+}
+
+export function isThreadCacheInvalidatedBySummary(
+  entries: readonly SessionEntry[],
+  threadId: string,
+  provider: string,
+  modelId: string,
+): boolean {
+  let latestAssistantIndex = -1;
+  let latestSummaryIndex = -1;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    if (summaryAffectsThread(entry, threadId)) latestSummaryIndex = index;
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    const messageThreadId = getRouterMetadata(entry.message)?.threadId ?? "origin";
+    if (
+      messageThreadId === threadId
+      && entry.message.provider === provider
+      && entry.message.model === modelId
+    ) latestAssistantIndex = index;
+  }
+  return latestSummaryIndex > latestAssistantIndex;
+}
+
+export function findCurrentModelEpochUsage(
+  entries: readonly SessionEntry[],
+  threadId: string,
+  provider: string,
+  modelId: string,
+  limit = 3,
+): Usage[] {
+  let epochStart = 0;
+  let routedModelKey: string | undefined;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (
+      !entry
+      || entry.type !== "custom"
+      || (entry.customType !== "switchyard" && entry.customType !== "jev-router")
+    ) continue;
+    const data = entry.data as RouterSessionEntryData | undefined;
+    if (data?.kind !== "route") continue;
+    const routeThreadId = data.route.threadId === ("parent" as string) ? "origin" : data.route.threadId;
+    if (routeThreadId !== threadId) continue;
+    const nextKey = `${data.route.provider}/${data.route.modelId}`;
+    if (nextKey !== routedModelKey) epochStart = index;
+    routedModelKey = nextKey;
+  }
+  if (routedModelKey !== `${provider}/${modelId}`) return [];
+  for (let index = epochStart; index < entries.length; index += 1) {
+    if (summaryAffectsThread(entries[index]!, threadId)) epochStart = index;
+  }
+  return entries.slice(epochStart)
+    .filter((entry): entry is Extract<SessionEntry, { type: "message" }> => entry.type === "message")
+    .map((entry) => entry.message)
+    .filter((message): message is Extract<AgentMessage, { role: "assistant" }> => {
+      if (message.role !== "assistant") return false;
+      const messageThreadId = getRouterMetadata(message)?.threadId ?? "origin";
+      return messageThreadId === threadId
+        && message.provider === provider
+        && message.model === modelId;
+    })
+    .slice(-Math.max(1, limit))
+    .map((message) => message.usage);
 }
 
 export function restoreThreads(entries: readonly SessionEntry[]): Map<string, TempThread> {

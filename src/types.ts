@@ -35,6 +35,14 @@ export interface SwitchingConfig {
   assumedWarmCacheRatio: number;
   assumedCacheWriteRatio: number;
   defaultExpectedOutputTokens: number;
+  downgradeMode: "enforce" | "shadow";
+  evidenceDecay: number;
+  minimumEvidenceScore: number;
+  minimumEvidenceWeight: number;
+  hardRequirementPenalty: number;
+  forecastTurns: number;
+  returnProbabilityFloor: number;
+  returnCostMultiplier: number;
   economics: Record<string, ModelEconomics>;
 }
 
@@ -71,6 +79,7 @@ export interface OriginContextItem {
 }
 
 export interface RouteDecision {
+  requestId?: string;
   target: "origin" | "new_temp_from_origin" | string;
   tier: TierName;
   targetConfidence: number;

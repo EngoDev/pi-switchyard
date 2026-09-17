@@ -1,6 +1,7 @@
 import type { Model, ModelCostRates } from "@earendil-works/pi-ai";
 
 import type {
+  RouteDecision,
   SwitchingConfig,
   TierConfig,
   TierName,
@@ -36,7 +37,14 @@ export type ModelSwitchReason =
   | "unknown-economics-stay"
   | "unknown-economics-switch"
   | "material-savings"
-  | "insufficient-savings";
+  | "insufficient-savings"
+  | "insufficient-evidence"
+  | "return-cost-not-covered"
+  | "stable-downgrade"
+  | "same-model-stable-downgrade"
+  | "shadow-downgrade"
+  | "no-effective-downgrade"
+  | "dominated-economics";
 
 export interface SwitchEconomics {
   contextTokens: number;
@@ -57,8 +65,12 @@ export interface ModelSwitchDecision {
   selection: "candidate" | "incumbent";
   selected: RoutedModel;
   incumbent?: RoutedModel;
+  proposed?: RoutedModel;
   reason: ModelSwitchReason;
   economics?: SwitchEconomics;
+  evidence?: Record<string, DestinationEvidence>;
+  forecast?: DowngradeForecast;
+  evaluations?: DestinationEvaluation[];
 }
 
 function modelKey(model: Model<any>): string {
@@ -159,7 +171,9 @@ export function evaluateModelSwitch(input: ModelSwitchInput): ModelSwitchDecisio
     + usd(promptTokens, incumbentRates.input)
     + usd(expectedOutputTokens, incumbentRates.output);
   const coldSwitchCostUsd =
-    inputBucketCost(prefixTokens, candidateRates, config.assumedCacheWriteRatio)
+    // Compare the incumbent and candidate with the same uncached-prefix bucket mix.
+    // Otherwise an assumed candidate write ratio can manufacture savings.
+    inputBucketCost(prefixTokens, candidateRates, cacheWriteRatio)
     + usd(promptTokens, candidateRates.input)
     + usd(expectedOutputTokens, candidateRates.output);
   const savingsUsd = warmStayCostUsd - coldSwitchCostUsd;
@@ -197,6 +211,446 @@ export function evaluateModelSwitch(input: ModelSwitchInput): ModelSwitchDecisio
       };
 }
 
+export function acceptTierRecommendation(
+  requestId: string,
+  decision: RouteDecision,
+  resolvedTier: TierName,
+): TierRecommendationEvidence {
+  return {
+    requestId,
+    tier: resolvedTier,
+    confidence: decision.tierConfidence,
+    tierProbabilities: resolvedTier === decision.tier
+      ? { ...decision.tierProbabilities }
+      : Object.fromEntries(
+          CAPABILITY_ORDER.map((tier) => [tier, tier === resolvedTier ? 1 : 0]),
+        ) as Record<TierName, number>,
+  };
+}
+
+export interface TierRecommendationEvidence {
+  requestId: string;
+  tier: TierName;
+  confidence: number;
+  tierProbabilities: Record<TierName, number>;
+}
+
+export interface DestinationEvidence {
+  tier: TierName;
+  score: number;
+  supportWeight: number;
+  oppositionWeight: number;
+  returnProbability: number;
+  passes: boolean;
+}
+
+export interface DowngradeForecast {
+  turns: number;
+  perTurnReturnProbability: number;
+  cumulativeReturnProbability: number;
+  baselineCostUsd: number;
+  transitionCostUsd: number;
+  returnCostReserveUsd: number;
+  netSavingsUsd: number;
+  netSavingsRatio: number;
+}
+
+export interface DestinationEvaluation {
+  destination: RoutedModel;
+  evidence: DestinationEvidence;
+  economics?: SwitchEconomics;
+  forecast?: DowngradeForecast;
+  gates: {
+    currentRequirement: boolean;
+    confidence: boolean;
+    evidence: boolean;
+    economics: boolean;
+    savings: boolean;
+    effectiveThinkingReduction: boolean;
+    notRateDominated: boolean;
+  };
+}
+
+export interface ModelTransitionInput {
+  incumbent: RoutedModel | undefined;
+  requested: RoutedModel;
+  candidates: RoutedModel[];
+  currentRecommendation: TierRecommendationEvidence;
+  recommendationHistory: TierRecommendationEvidence[];
+  contextTokens: number;
+  promptTokens: number;
+  warmCacheRatio: number | undefined;
+  warmCacheSource?: "observed" | "assumed" | "invalidated" | "no-history";
+  cacheWriteRatio?: number;
+  expectedOutputTokens: number;
+  config: SwitchingConfig;
+}
+
+export interface ModelTransitionDecision extends ModelSwitchDecision {
+  requested: RoutedModel;
+  evaluations?: DestinationEvaluation[];
+}
+
+function normalizedProbabilities(evidence: TierRecommendationEvidence): Record<TierName, number> {
+  const total = CAPABILITY_ORDER.reduce((sum, tier) => sum + Math.max(0, evidence.tierProbabilities[tier] ?? 0), 0);
+  if (total <= 0) {
+    return Object.fromEntries(
+      CAPABILITY_ORDER.map((tier) => [tier, tier === evidence.tier ? 1 : 0]),
+    ) as Record<TierName, number>;
+  }
+  return Object.fromEntries(
+    CAPABILITY_ORDER.map((tier) => [tier, Math.max(0, evidence.tierProbabilities[tier] ?? 0) / total]),
+  ) as Record<TierName, number>;
+}
+
+function destinationEvidence(
+  tier: TierName,
+  history: TierRecommendationEvidence[],
+  config: SwitchingConfig,
+): DestinationEvidence {
+  const destination = CAPABILITY_ORDER.indexOf(tier);
+  let supportWeight = 0;
+  let oppositionWeight = 0;
+  let rawSupport = 0;
+  let rawOpposition = 0;
+  const newestFirst = [...history].reverse();
+  for (let age = 0; age < newestFirst.length; age += 1) {
+    const item = newestFirst[age]!;
+    const probabilities = normalizedProbabilities(item);
+    const recency = config.evidenceDecay ** age;
+    const confidenceWeight = 0.25 + 0.75 * Math.max(0, Math.min(1, item.confidence));
+    const weight = recency * confidenceWeight;
+    const supportProbability = CAPABILITY_ORDER.reduce(
+      (sum, candidateTier, index) => sum + (index <= destination ? probabilities[candidateTier] : 0),
+      0,
+    );
+    const oppositionProbability = Math.max(0, 1 - supportProbability);
+    supportWeight += weight * supportProbability;
+    oppositionWeight += weight * oppositionProbability * config.hardRequirementPenalty;
+    rawSupport += weight * supportProbability;
+    rawOpposition += weight * oppositionProbability;
+  }
+  const denominator = supportWeight + oppositionWeight;
+  const score = denominator > 0 ? supportWeight / denominator : 0;
+  const rawDenominator = rawSupport + rawOpposition;
+  const observedReturnProbability = rawDenominator > 0 ? rawOpposition / rawDenominator : 1;
+  const returnProbability = Math.max(config.returnProbabilityFloor, observedReturnProbability);
+  return {
+    tier,
+    score,
+    supportWeight,
+    oppositionWeight,
+    returnProbability,
+    passes: score >= config.minimumEvidenceScore
+      && supportWeight >= config.minimumEvidenceWeight,
+  };
+}
+
+const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+function providerEffectiveThinking(
+  model: Model<any>,
+  thinking: TierConfig["thinking"],
+): string | undefined {
+  if (thinking === "default") return undefined;
+  const mapped = model.thinkingLevelMap?.[thinking];
+  if (mapped === null) return undefined;
+  return typeof mapped === "string" ? mapped : thinking;
+}
+
+function sameModelHasEffectiveThinkingReduction(incumbent: RoutedModel, destination: RoutedModel): boolean {
+  if (!sameModel(incumbent.model, destination.model)) return true;
+  const currentValue = providerEffectiveThinking(incumbent.model, incumbent.tierConfig.thinking);
+  const nextValue = providerEffectiveThinking(destination.model, destination.tierConfig.thinking);
+  if (!currentValue || !nextValue || currentValue === nextValue) return false;
+  const current = THINKING_ORDER.indexOf(currentValue as (typeof THINKING_ORDER)[number]);
+  const next = THINKING_ORDER.indexOf(nextValue as (typeof THINKING_ORDER)[number]);
+  return current >= 0 && next >= 0 && next < current;
+}
+
+function candidateRatesAreDominated(incumbent: ModelCostRates, candidate: ModelCostRates): boolean {
+  const keys: Array<keyof ModelCostRates> = ["input", "output", "cacheRead", "cacheWrite"];
+  // A different model with equal-or-higher rates cannot create genuine savings;
+  // apparent gains would come only from asymmetric cache assumptions.
+  return keys.every((key) => candidate[key] >= incumbent[key]);
+}
+
+function warmCostFromRates(
+  rates: ModelCostRates,
+  contextTokens: number,
+  promptTokens: number,
+  outputTokens: number,
+  warmRatio: number,
+  cacheWriteRatio: number,
+): number {
+  const prefixTokens = Math.max(0, contextTokens - promptTokens);
+  const warmTokens = prefixTokens * warmRatio;
+  const coldPrefixTokens = prefixTokens - warmTokens;
+  return usd(warmTokens, rates.cacheRead)
+    + inputBucketCost(coldPrefixTokens, rates, cacheWriteRatio)
+    + usd(promptTokens, rates.input)
+    + usd(outputTokens, rates.output);
+}
+
+/**
+ * Deterministic economic-safety policy for model transitions.
+ *
+ * This is the single decision boundary for evidence-based downgrades. It performs no
+ * I/O and reads no hidden state: callers must provide routing evidence, cache epoch
+ * observations, candidate models, pricing, and policy explicitly. Historical evidence
+ * may support a downgrade but can never override the current accepted requirement.
+ */
+export function decideModelTransition(input: ModelTransitionInput): ModelTransitionDecision {
+  const { incumbent, requested, config } = input;
+  const immediate = evaluateModelSwitch({
+    incumbent,
+    candidate: requested,
+    tierConfidence: input.currentRecommendation.confidence,
+    contextTokens: input.contextTokens,
+    promptTokens: input.promptTokens,
+    warmCacheRatio: input.warmCacheRatio,
+    ...(input.warmCacheSource ? { warmCacheSource: input.warmCacheSource } : {}),
+    ...(input.cacheWriteRatio !== undefined ? { cacheWriteRatio: input.cacheWriteRatio } : {}),
+    expectedOutputTokens: input.expectedOutputTokens,
+    config,
+  });
+  if (!incumbent || !config.cacheAware) return { ...immediate, requested };
+
+  const incumbentCapability = CAPABILITY_ORDER.indexOf(incumbent.tier);
+  const requiredCapability = CAPABILITY_ORDER.indexOf(input.currentRecommendation.tier);
+  const deduplicated = new Map<string, TierRecommendationEvidence>();
+  for (const item of [...input.recommendationHistory, input.currentRecommendation]) {
+    deduplicated.delete(item.requestId);
+    deduplicated.set(item.requestId, item);
+  }
+  const history = [...deduplicated.values()];
+  if (requiredCapability >= incumbentCapability) {
+    const evaluations: DestinationEvaluation[] = input.candidates
+      .filter((candidate) => CAPABILITY_ORDER.indexOf(candidate.tier) < requiredCapability)
+      .map((destination) => {
+        const evidence = destinationEvidence(destination.tier, history, config);
+        return {
+          destination,
+          evidence,
+          gates: {
+            currentRequirement: false,
+            confidence: input.currentRecommendation.confidence >= config.downgradeConfidenceFloor,
+            evidence: evidence.passes,
+            economics: false,
+            savings: false,
+            effectiveThinkingReduction: sameModelHasEffectiveThinkingReduction(incumbent, destination),
+            notRateDominated: true,
+          },
+        };
+      });
+    if (requiredCapability > incumbentCapability) {
+      return {
+        selection: "candidate",
+        selected: requested,
+        incumbent,
+        requested,
+        reason: "capability-upgrade",
+        evaluations,
+      };
+    }
+    return { ...immediate, requested, evaluations };
+  }
+  const evidenceByTier: Record<string, DestinationEvidence> = {};
+  const evaluations: DestinationEvaluation[] = [];
+  const uniqueCandidates = new Map<TierName, RoutedModel>();
+  for (const candidate of input.candidates) uniqueCandidates.set(candidate.tier, candidate);
+  for (const [tier, destination] of uniqueCandidates) {
+    const capability = CAPABILITY_ORDER.indexOf(tier);
+    if (capability >= incumbentCapability) continue;
+    const evidence = destinationEvidence(tier, history, config);
+    evidenceByTier[tier] = evidence;
+    const same = sameModel(incumbent.model, destination.model);
+    const thinkingReduction = sameModelHasEffectiveThinkingReduction(incumbent, destination);
+    const baseGates = {
+      currentRequirement: capability >= requiredCapability,
+      confidence: input.currentRecommendation.confidence >= config.downgradeConfidenceFloor,
+      evidence: evidence.passes,
+      economics: same ? thinkingReduction : false,
+      savings: same ? thinkingReduction : false,
+      effectiveThinkingReduction: thinkingReduction,
+      notRateDominated: true,
+    };
+    if (same) {
+      evaluations.push({ destination, evidence, gates: baseGates });
+      continue;
+    }
+    const economicsDecision = evaluateModelSwitch({
+      incumbent,
+      candidate: destination,
+      tierConfidence: 1,
+      contextTokens: input.contextTokens,
+      promptTokens: input.promptTokens,
+      warmCacheRatio: input.warmCacheRatio,
+      ...(input.warmCacheSource ? { warmCacheSource: input.warmCacheSource } : {}),
+      ...(input.cacheWriteRatio !== undefined ? { cacheWriteRatio: input.cacheWriteRatio } : {}),
+      expectedOutputTokens: input.expectedOutputTokens,
+      config: { ...config, downgradeConfidenceFloor: 0, minSavingsRatio: 0, minSavingsUsd: 0 },
+    });
+    const economics = economicsDecision.economics;
+    if (!economics) {
+      const allowed = config.unknownCostPolicy === "switch";
+      evaluations.push({
+        destination,
+        evidence,
+        gates: {
+          ...baseGates,
+          economics: allowed,
+          savings: allowed,
+        },
+      });
+      continue;
+    }
+    const rateDominated = candidateRatesAreDominated(
+      economics.incumbentRates,
+      economics.candidateRates,
+    );
+    const destinationWarmCost = warmCostFromRates(
+      economics.candidateRates,
+      economics.contextTokens,
+      economics.promptTokens,
+      economics.expectedOutputTokens,
+      config.assumedWarmCacheRatio,
+      config.assumedCacheWriteRatio,
+    );
+    const incumbentFutureWarmCost = warmCostFromRates(
+      economics.incumbentRates,
+      economics.contextTokens,
+      economics.promptTokens,
+      economics.expectedOutputTokens,
+      config.assumedWarmCacheRatio,
+      config.assumedCacheWriteRatio,
+    );
+    const incumbentColdReturnCost = warmCostFromRates(
+      economics.incumbentRates,
+      economics.contextTokens,
+      economics.promptTokens,
+      economics.expectedOutputTokens,
+      0,
+      config.assumedCacheWriteRatio,
+    );
+    const turns = Math.max(1, config.forecastTurns);
+    const perTurnReturnProbability = Math.max(0, Math.min(1, evidence.returnProbability));
+    const cumulativeReturnProbability = turns <= 1
+      ? 0
+      : 1 - (1 - perTurnReturnProbability) ** (turns - 1);
+    const baselineCostUsd = economics.warmStayCostUsd + incumbentFutureWarmCost * (turns - 1);
+    let transitionCostUsd = economics.coldSwitchCostUsd;
+    for (let futureTurn = 1; futureTurn < turns; futureTurn += 1) {
+      const destinationSurvival = (1 - perTurnReturnProbability) ** futureTurn;
+      transitionCostUsd += destinationSurvival * destinationWarmCost
+        + (1 - destinationSurvival) * incumbentFutureWarmCost;
+    }
+    const returnCostReserveUsd = Math.max(0, incumbentColdReturnCost - incumbentFutureWarmCost)
+      * cumulativeReturnProbability
+      * config.returnCostMultiplier;
+    const netSavingsUsd = baselineCostUsd - transitionCostUsd - returnCostReserveUsd;
+    const netSavingsRatio = baselineCostUsd > 0 ? netSavingsUsd / baselineCostUsd : 0;
+    const savings = netSavingsUsd >= config.minSavingsUsd
+      && netSavingsRatio >= config.minSavingsRatio;
+    evaluations.push({
+      destination,
+      evidence,
+      economics,
+      gates: {
+        ...baseGates,
+        economics: true,
+        savings: savings && !rateDominated,
+        notRateDominated: !rateDominated,
+      },
+      forecast: {
+        turns,
+        perTurnReturnProbability,
+        cumulativeReturnProbability,
+        baselineCostUsd,
+        transitionCostUsd,
+        returnCostReserveUsd,
+        netSavingsUsd,
+        netSavingsRatio,
+      },
+    });
+  }
+
+  const passing = evaluations.filter((item) => Object.values(item.gates).every(Boolean));
+  passing.sort((a, b) => {
+    const aSavings = a.forecast?.netSavingsUsd ?? 0;
+    const bSavings = b.forecast?.netSavingsUsd ?? 0;
+    if (aSavings !== bSavings) return bSavings - aSavings;
+    return CAPABILITY_ORDER.indexOf(a.destination.tier) - CAPABILITY_ORDER.indexOf(b.destination.tier);
+  });
+  const winner = passing[0];
+  if (!winner) {
+    const eligible = evaluations.filter((item) => item.gates.currentRequirement);
+    const confidenceFailed = eligible.length > 0 && eligible.every((item) => !item.gates.confidence);
+    const hasEvidence = eligible.some((item) => item.gates.confidence && item.gates.evidence);
+    const unknownEconomics = evaluations.some((item) =>
+      item.gates.currentRequirement
+      && item.gates.confidence
+      && item.gates.evidence
+      && !sameModel(incumbent.model, item.destination.model)
+      && !item.gates.economics);
+    const noEffectiveDowngrade = evaluations.some((item) =>
+      item.gates.currentRequirement
+      && item.gates.confidence
+      && item.gates.evidence
+      && sameModel(incumbent.model, item.destination.model)
+      && !item.gates.effectiveThinkingReduction);
+    const dominatedEconomics = evaluations.some((item) =>
+      item.gates.currentRequirement
+      && item.gates.confidence
+      && item.gates.evidence
+      && !item.gates.notRateDominated);
+    const audit = [...evaluations].sort(
+      (a, b) => (b.forecast?.netSavingsUsd ?? -Infinity) - (a.forecast?.netSavingsUsd ?? -Infinity),
+    )[0];
+    return {
+      ...immediate,
+      selection: "incumbent",
+      selected: incumbent,
+      incumbent,
+      requested,
+      reason: confidenceFailed
+        ? "low-downgrade-confidence"
+        : unknownEconomics
+          ? "unknown-economics-stay"
+          : noEffectiveDowngrade
+            ? "no-effective-downgrade"
+            : dominatedEconomics
+              ? "dominated-economics"
+              : hasEvidence
+                ? "return-cost-not-covered"
+                : "insufficient-evidence",
+      ...(audit?.economics ? { economics: audit.economics } : {}),
+      ...(audit?.forecast ? { forecast: audit.forecast } : {}),
+      evidence: evidenceByTier,
+      evaluations,
+    };
+  }
+
+  const same = sameModel(incumbent.model, winner.destination.model);
+  const reason: ModelSwitchReason = config.downgradeMode === "shadow"
+    ? "shadow-downgrade"
+    : same
+      ? "same-model-stable-downgrade"
+      : "stable-downgrade";
+  return {
+    selection: config.downgradeMode === "shadow" ? "incumbent" : "candidate",
+    selected: config.downgradeMode === "shadow" ? incumbent : winner.destination,
+    incumbent,
+    requested,
+    ...(config.downgradeMode === "shadow" ? { proposed: winner.destination } : {}),
+    reason,
+    ...(winner.economics ? { economics: winner.economics } : {}),
+    evidence: evidenceByTier,
+    ...(winner.forecast ? { forecast: winner.forecast } : {}),
+    evaluations,
+  };
+}
+
 function shortModel(value: RoutedModel): string {
   return `${value.tier}/${value.model.id}`;
 }
@@ -225,6 +679,21 @@ export function formatMinimalSwitchDecision(
   if (!current) return `${prefix} · selected ${selected} · new thread`;
   if (decision.reason === "same-model") {
     return `${prefix} · ${requested.model.id} ${decision.incumbent!.tierConfig.thinking} → ${decision.selected.tierConfig.thinking} · same model`;
+  }
+  if (decision.reason === "same-model-stable-downgrade") {
+    return `${prefix} · ${current} → ${selected} · stable thinking downgrade`;
+  }
+  if (decision.reason === "stable-downgrade" && decision.forecast) {
+    return `${prefix} · ${current} → ${selected} · stable downgrade · forecast save $${decision.forecast.netSavingsUsd.toFixed(4)} (${(decision.forecast.netSavingsRatio * 100).toFixed(1)}%)`;
+  }
+  if (decision.reason === "shadow-downgrade") {
+    return `${prefix} · kept ${current} · proposed ${decision.proposed ? shortModel(decision.proposed) : shortModel(requested)} · shadow mode`;
+  }
+  if (decision.reason === "insufficient-evidence") {
+    return `${prefix} · kept ${current} · ${shortModel(requested)} downgrade trend still building`;
+  }
+  if (decision.reason === "return-cost-not-covered") {
+    return `${prefix} · kept ${current} · return cost not yet covered`;
   }
   if (decision.selection === "candidate") {
     if (decision.reason === "capability-upgrade") {
@@ -260,9 +729,41 @@ export function formatVerboseSwitchDecision(
     `current:   ${fullModel(decision.incumbent)}`,
     `requested: ${fullModel(requested)}`,
     `selected:  ${fullModel(decision.selected)}`,
+    ...(decision.proposed ? [`proposed:  ${fullModel(decision.proposed)}`] : []),
     `reason:    ${decision.reason}`,
     `confidence: target ${(context.targetConfidence * 100).toFixed(1)}% · tier ${(context.tierConfidence * 100).toFixed(1)}%`,
   ];
+  if (decision.evidence) {
+    const evidenceLines = CAPABILITY_ORDER
+      .filter((tier) => decision.evidence?.[tier])
+      .map((tier) => {
+        const evidence = decision.evidence![tier]!;
+        return `${tier}: score ${(evidence.score * 100).toFixed(1)}% · support ${evidence.supportWeight.toFixed(2)} · opposition ${evidence.oppositionWeight.toFixed(2)}${evidence.passes ? " · pass" : " · fail"}`;
+      });
+    if (evidenceLines.length > 0) lines.push("", "evidence:", ...evidenceLines);
+  }
+  if (decision.evaluations && decision.evaluations.length > 0) {
+    lines.push("", "destinations:");
+    for (const evaluation of decision.evaluations) {
+      const failed = Object.entries(evaluation.gates)
+        .filter(([, passed]) => !passed)
+        .map(([gate]) => gate);
+      const forecast = evaluation.forecast
+        ? ` · net $${evaluation.forecast.netSavingsUsd.toFixed(4)} (${(evaluation.forecast.netSavingsRatio * 100).toFixed(1)}%)`
+        : "";
+      lines.push(`${evaluation.destination.tier}: ${failed.length === 0 ? "pass" : `fail ${failed.join(",")}`}${forecast}`);
+    }
+  }
+  if (decision.forecast) {
+    lines.push(
+      "",
+      `forecast:      ${decision.forecast.turns} turns · return ${(decision.forecast.perTurnReturnProbability * 100).toFixed(1)}%/turn · ${(decision.forecast.cumulativeReturnProbability * 100).toFixed(1)}% cumulative`,
+      `baseline:      $${decision.forecast.baselineCostUsd.toFixed(4)}`,
+      `transition:    $${decision.forecast.transitionCostUsd.toFixed(4)}`,
+      `return reserve:$${decision.forecast.returnCostReserveUsd.toFixed(4)}`,
+      `net savings:   $${decision.forecast.netSavingsUsd.toFixed(4)} (${(decision.forecast.netSavingsRatio * 100).toFixed(1)}%)`,
+    );
+  }
   if (decision.economics) {
     const economics = decision.economics;
     lines.push(

@@ -50,30 +50,35 @@ import {
   selectOriginContext,
 } from "./origin-context.js";
 import {
-  evaluateModelSwitch,
+  acceptTierRecommendation,
+  decideModelTransition,
   formatMinimalSwitchDecision,
   formatVerboseSwitchDecision,
-  type ModelSwitchDecision,
+  type ModelTransitionDecision,
   type RoutedModel,
+  type TierRecommendationEvidence,
 } from "./switching.js";
 import { summarizeOriginBranch } from "./tree-summary.js";
 import {
   createTempThread,
   filterMessagesForOrigin,
   findMissingTempLabels,
+  findCurrentModelEpochUsage,
   findLastRouteForThread,
+  findRouteHistoryForThread,
   findPendingPromotedPrompt,
   findRecoverableLifecycle,
   findRecoverablePromotion,
   findThreadBranchPoint,
   getOriginContext,
-  getRouterMetadata,
+  isThreadCacheInvalidatedBySummary,
   messagesForPromotedSession,
   messagesFromEntries,
   restoreThreads,
   threadContextFromEntries,
   updateThreadFromMessage,
 } from "./threads.js";
+import { TIER_NAMES } from "./types.js";
 import type {
   ActiveRoute,
   RouterConfig,
@@ -91,6 +96,7 @@ const ORIGIN_CONTEXT_TOOL = "get_context_from_origin";
 const CAPABILITY_ORDER: TierName[] = ["cheap", "handy", "smart", "genius"];
 
 type PendingRouteDecision = {
+  requestId: string;
   prompt: string;
   imageFingerprint: string;
   decision: Awaited<ReturnType<typeof decideRoute>>;
@@ -182,6 +188,20 @@ function resolveTierModel(
   return undefined;
 }
 
+function resolveTransitionCandidates(
+  ctx: ExtensionContext,
+  config: RouterConfig,
+  hasImages: boolean,
+): RoutedModel[] {
+  return TIER_NAMES.flatMap((tier) => {
+    const tierConfig = config.tiers[tier];
+    if (!tierConfig) return [];
+    const model = ctx.modelRegistry.find(tierConfig.provider, tierConfig.modelId);
+    if (!model || (hasImages && !modelSupportsImages(model))) return [];
+    return [{ tier, tierConfig, model }];
+  });
+}
+
 function getSessionMessages(ctx: ExtensionContext): AgentMessage[] {
   return messagesFromEntries(ctx.sessionManager.getBranch());
 }
@@ -223,58 +243,41 @@ function threadMessagesForSwitching(
   return thread ? threadContextFromEntries(ctx.sessionManager.getBranch(), thread) : [];
 }
 
-function threadCacheInvalidatedBySummary(
-  ctx: ExtensionContext,
-  threadId: string,
-  incumbent: RoutedModel | undefined,
-): boolean {
-  if (!incumbent) return false;
-  const entries = ctx.sessionManager.getBranch();
-  let latestAssistantIndex = -1;
-  let latestSummaryIndex = -1;
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (!entry) continue;
-    if (entry.type === "compaction" || entry.type === "branch_summary") latestSummaryIndex = index;
-    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-    const metadata = getRouterMetadata(entry.message);
-    const messageThreadId = metadata?.threadId ?? "origin";
-    if (
-      messageThreadId === threadId
-      && entry.message.provider === incumbent.model.provider
-      && entry.message.model === incumbent.model.id
-    ) latestAssistantIndex = index;
-  }
-  return latestSummaryIndex > latestAssistantIndex;
-}
-
 function evaluateThreadModelSwitch(
   ctx: ExtensionContext,
   threadId: string,
   thread: TempThread | undefined,
-  candidate: RoutedModel,
-  tierConfidence: number,
+  requested: RoutedModel,
+  candidates: RoutedModel[],
+  currentRecommendation: TierRecommendationEvidence,
   prompt: string,
   imageCount: number,
   providerOverheadTokens: number,
   config: RouterConfig,
-): ModelSwitchDecision {
+): ModelTransitionDecision {
   const messages = threadMessagesForSwitching(ctx, threadId, thread);
   const incumbent = resolveThreadIncumbent(ctx, threadId, imageCount > 0);
-  const recentUsage = messages
-    .filter((message): message is Extract<AgentMessage, { role: "assistant" }> =>
-      message.role === "assistant"
-      && incumbent !== undefined
-      && message.provider === incumbent.model.provider
-      && message.model === incumbent.model.id)
-    .slice(-3)
-    .map((message) => message.usage);
+  const recentUsage = incumbent
+    ? findCurrentModelEpochUsage(
+        ctx.sessionManager.getBranch(),
+        threadId,
+        incumbent.model.provider,
+        incumbent.model.id,
+      )
+    : [];
   const cacheInput = recentUsage.reduce(
     (sum, usage) => sum + usage.input + usage.cacheRead + usage.cacheWrite,
     0,
   );
   const observedCacheRead = recentUsage.reduce((sum, usage) => sum + usage.cacheRead, 0);
-  const cacheInvalidated = threadCacheInvalidatedBySummary(ctx, threadId, incumbent);
+  const cacheInvalidated = incumbent
+    ? isThreadCacheInvalidatedBySummary(
+        ctx.sessionManager.getBranch(),
+        threadId,
+        incumbent.model.provider,
+        incumbent.model.id,
+      )
+    : false;
   const warmCacheRatio = cacheInvalidated
     ? 0
     : cacheInput > 0
@@ -298,10 +301,21 @@ function evaluateThreadModelSwitch(
   const contextTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0)
     + promptTokens
     + Math.max(0, providerOverheadTokens);
-  return evaluateModelSwitch({
+  const recommendationHistory: TierRecommendationEvidence[] = findRouteHistoryForThread(
+    ctx.sessionManager.getBranch(),
+    threadId,
+  ).slice(-32).map((route, index) => ({
+    requestId: route.decision.requestId ?? `legacy-${index}-${route.provider}-${route.modelId}`,
+    tier: route.decision.tier,
+    confidence: route.decision.tierConfidence,
+    tierProbabilities: route.decision.tierProbabilities,
+  }));
+  return decideModelTransition({
     incumbent,
-    candidate,
-    tierConfidence,
+    requested,
+    candidates,
+    currentRecommendation,
+    recommendationHistory,
     contextTokens,
     promptTokens,
     warmCacheRatio,
@@ -972,6 +986,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       return { action: "handled" as const };
     }
     pendingRouteDecision = {
+      requestId: uuidv7(),
       prompt: event.text,
       imageFingerprint: fingerprintImages(event.images),
       decision,
@@ -1201,6 +1216,12 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       model: resolved.model,
       tierConfig: resolved.tierConfig,
     };
+    const transitionCandidates = resolveTransitionCandidates(ctx, config, hasImages);
+    const currentRecommendation = acceptTierRecommendation(
+      preflight?.requestId ?? uuidv7(),
+      decision,
+      resolved.tier,
+    );
     const activeToolNames = new Set(pi.getActiveTools());
     if (targetThreadId !== "origin") activeToolNames.add(ORIGIN_CONTEXT_TOOL);
     const providerVisibleTools = pi.getAllTools()
@@ -1218,7 +1239,8 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       targetThreadId,
       targetThread,
       candidate,
-      decision.tierConfidence,
+      transitionCandidates,
+      currentRecommendation,
       event.prompt,
       event.images?.length ?? 0,
       providerOverheadTokens,
@@ -1245,7 +1267,12 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       provider: selectedModel.tierConfig.provider,
       modelId: selectedModel.tierConfig.modelId,
       thinking: effectiveThinking,
-      decision: { ...decision, tier: resolved.tier },
+      decision: {
+        ...decision,
+        requestId: currentRecommendation.requestId,
+        tier: currentRecommendation.tier,
+        tierProbabilities: currentRecommendation.tierProbabilities,
+      },
     };
     originFallbackForNext = false;
     lastVisibleRoute = activeRoute;

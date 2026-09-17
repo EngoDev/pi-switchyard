@@ -5,7 +5,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
 
-import { writeConfigPatch, type ConfigScope } from "./config.js";
+import {
+  writeConfigPatch,
+  writeSwitchingPatch,
+  type ConfigScope,
+  type SwitchingConfigPatch,
+} from "./config.js";
 import { showPicker } from "./picker.js";
 import {
   TIER_NAMES,
@@ -74,7 +79,7 @@ export function buildCategoryItems(config: RouterConfig): SelectItem[] {
       value: "switching",
       label: "cache-aware model switching",
       description: config.switching.cacheAware
-        ? `on · ${(config.switching.minSavingsRatio * 100).toFixed(0)}% / $${config.switching.minSavingsUsd} minimum savings`
+        ? `${config.switching.downgradeMode} · ${(config.switching.minSavingsRatio * 100).toFixed(0)}% / $${config.switching.minSavingsUsd} minimum savings`
         : "off",
     },
     {
@@ -104,7 +109,6 @@ function formatConfig(config: RouterConfig): string {
     `temp thread soft token limit: ${config.tempThreadSoftTokenLimit}`,
     `temp thread soft turn limit: ${config.tempThreadSoftTurnLimit}`,
     `cache-aware switching: ${config.switching.cacheAware}`,
-    `upgrades always switch: ${config.switching.upgradesAlwaysSwitch}`,
     `downgrade confidence floor: ${config.switching.downgradeConfidenceFloor}`,
     `minimum switch savings ratio: ${config.switching.minSavingsRatio}`,
     `minimum switch savings USD: ${config.switching.minSavingsUsd}`,
@@ -112,6 +116,14 @@ function formatConfig(config: RouterConfig): string {
     `assumed warm cache ratio: ${config.switching.assumedWarmCacheRatio}`,
     `assumed cache-write ratio: ${config.switching.assumedCacheWriteRatio}`,
     `default expected output tokens: ${config.switching.defaultExpectedOutputTokens}`,
+    `downgrade mode: ${config.switching.downgradeMode}`,
+    `evidence decay: ${config.switching.evidenceDecay}`,
+    `minimum evidence score: ${config.switching.minimumEvidenceScore}`,
+    `minimum evidence weight: ${config.switching.minimumEvidenceWeight}`,
+    `hard requirement penalty: ${config.switching.hardRequirementPenalty}`,
+    `forecast turns: ${config.switching.forecastTurns}`,
+    `return probability floor: ${config.switching.returnProbabilityFloor}`,
+    `return cost multiplier: ${config.switching.returnCostMultiplier}`,
     `economics overrides: ${Object.keys(config.switching.economics).length}`,
   ];
   for (const tier of TIER_NAMES) {
@@ -255,11 +267,11 @@ async function editTempLimits(ctx: ExtensionCommandContext, hooks: Configuration
 async function saveSwitching(
   ctx: ExtensionCommandContext,
   hooks: ConfigurationHooks,
-  switching: RouterConfig["switching"],
+  switching: SwitchingConfigPatch,
 ): Promise<void> {
   const scope = await chooseScope(ctx, "Save cache-aware switching policy");
   if (!scope) return;
-  const path = writeConfigPatch(ctx.cwd, scope, { switching });
+  const path = writeSwitchingPatch(ctx.cwd, scope, switching);
   finishConfigChange(ctx, hooks);
   ctx.ui.notify(`Switching policy updated · ${path}`, "info");
 }
@@ -270,12 +282,22 @@ async function editSwitching(ctx: ExtensionCommandContext, hooks: ConfigurationH
       const policy = hooks.getConfig().switching;
       return showPicker(ctx, "Cache-aware model switching", [
         { value: "cache-aware", label: "cache-aware switching", description: String(policy.cacheAware) },
-        { value: "upgrade", label: "upgrades always switch", description: String(policy.upgradesAlwaysSwitch) },
+        { value: "mode", label: "downgrade mode", description: policy.downgradeMode },
         { value: "unknown", label: "unknown economics", description: policy.unknownCostPolicy },
         {
           value: "thresholds",
           label: "economics thresholds",
           description: `confidence ${policy.downgradeConfidenceFloor} · savings ${(policy.minSavingsRatio * 100).toFixed(0)}% / $${policy.minSavingsUsd}`,
+        },
+        {
+          value: "evidence",
+          label: "downgrade evidence",
+          description: `score ${(policy.minimumEvidenceScore * 100).toFixed(0)}% · weight ${policy.minimumEvidenceWeight} · decay ${policy.evidenceDecay}`,
+        },
+        {
+          value: "return-cost",
+          label: "forecast and return reserve",
+          description: `${policy.forecastTurns} turns · ${(policy.returnProbabilityFloor * 100).toFixed(0)}% floor · ${policy.returnCostMultiplier}x`,
         },
         {
           value: "estimation",
@@ -287,30 +309,31 @@ async function editSwitching(ctx: ExtensionCommandContext, hooks: ConfigurationH
           label: "economics overrides",
           description: `${Object.keys(policy.economics).length} configured in switchyard.json`,
         },
-      ], { maxVisible: 8 });
+      ], { maxVisible: 11 });
     },
     async (selected) => {
       const policy = hooks.getConfig().switching;
-      if (selected === "cache-aware" || selected === "upgrade") {
-        const current = selected === "cache-aware" ? policy.cacheAware : policy.upgradesAlwaysSwitch;
-        const value = await showPicker(ctx, selected === "cache-aware" ? "Enable cache-aware switching" : "Always allow capability upgrades", [
+      if (selected === "cache-aware") {
+        const value = await showPicker(ctx, "Enable cache-aware switching", [
           { value: "true", label: "true" },
           { value: "false", label: "false" },
-        ], { maxVisible: 4, preselect: String(current) });
+        ], { maxVisible: 4, preselect: String(policy.cacheAware) });
         if (!value) return;
-        await saveSwitching(ctx, hooks, {
-          ...policy,
-          ...(selected === "cache-aware"
-            ? { cacheAware: value === "true" }
-            : { upgradesAlwaysSwitch: value === "true" }),
-        });
+        await saveSwitching(ctx, hooks, { cacheAware: value === "true" });
+      } else if (selected === "mode") {
+        const value = await showPicker(ctx, "Downgrade execution mode", [
+          { value: "enforce", label: "enforce", description: "Apply proven economical downgrades" },
+          { value: "shadow", label: "shadow", description: "Calculate and report without switching" },
+        ], { maxVisible: 4, preselect: policy.downgradeMode });
+        if (!value) return;
+        await saveSwitching(ctx, hooks, { downgradeMode: value as "enforce" | "shadow" });
       } else if (selected === "unknown") {
         const value = await showPicker(ctx, "When model economics are unknown", [
           { value: "stay", label: "stay", description: "Preserve the incumbent model" },
           { value: "switch", label: "switch", description: "Use Jev's candidate" },
         ], { maxVisible: 4, preselect: policy.unknownCostPolicy });
         if (!value) return;
-        await saveSwitching(ctx, hooks, { ...policy, unknownCostPolicy: value as "stay" | "switch" });
+        await saveSwitching(ctx, hooks, { unknownCostPolicy: value as "stay" | "switch" });
       } else if (selected === "thresholds") {
         const value = await ctx.ui.input(
           "Downgrade confidence,min savings ratio,min savings USD",
@@ -323,10 +346,42 @@ async function editSwitching(ctx: ExtensionCommandContext, hooks: ConfigurationH
           return;
         }
         await saveSwitching(ctx, hooks, {
-          ...policy,
           downgradeConfidenceFloor: Math.min(1, parts[0]!),
           minSavingsRatio: Math.min(1, parts[1]!),
           minSavingsUsd: parts[2]!,
+        });
+      } else if (selected === "evidence") {
+        const value = await ctx.ui.input(
+          "Evidence decay,min score,min weight,hard requirement penalty",
+          `${policy.evidenceDecay},${policy.minimumEvidenceScore},${policy.minimumEvidenceWeight},${policy.hardRequirementPenalty}`,
+        );
+        if (value === undefined) return;
+        const parts = value.split(",").map((part) => Number(part.trim()));
+        if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+          ctx.ui.notify("Enter four non-negative numbers, for example 0.8,0.65,1.5,1.5", "error");
+          return;
+        }
+        await saveSwitching(ctx, hooks, {
+          evidenceDecay: Math.min(1, parts[0]!),
+          minimumEvidenceScore: Math.min(1, parts[1]!),
+          minimumEvidenceWeight: parts[2]!,
+          hardRequirementPenalty: parts[3]!,
+        });
+      } else if (selected === "return-cost") {
+        const value = await ctx.ui.input(
+          "Forecast turns,return probability floor,return cost multiplier",
+          `${policy.forecastTurns},${policy.returnProbabilityFloor},${policy.returnCostMultiplier}`,
+        );
+        if (value === undefined) return;
+        const parts = value.split(",").map((part) => Number(part.trim()));
+        if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+          ctx.ui.notify("Enter three non-negative numbers, for example 3,0.25,1", "error");
+          return;
+        }
+        await saveSwitching(ctx, hooks, {
+          forecastTurns: Math.max(1, Math.trunc(parts[0]!)),
+          returnProbabilityFloor: Math.min(1, parts[1]!),
+          returnCostMultiplier: parts[2]!,
         });
       } else if (selected === "estimation") {
         const value = await ctx.ui.input(
@@ -340,7 +395,6 @@ async function editSwitching(ctx: ExtensionCommandContext, hooks: ConfigurationH
           return;
         }
         await saveSwitching(ctx, hooks, {
-          ...policy,
           assumedWarmCacheRatio: Math.min(1, parts[0]!),
           assumedCacheWriteRatio: Math.min(1, parts[1]!),
           defaultExpectedOutputTokens: Math.trunc(parts[2]!),

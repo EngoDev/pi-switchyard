@@ -68,9 +68,20 @@ The estimate combines:
 - Its recent observed cache-read ratio, or a configurable conservative assumption
 - Its recent average output size, or a configurable default
 
-New threads have no incumbent cache to protect. Changing thinking on the same model does not incur a model-switch penalty. Capability upgrades switch by default because correctness takes priority. Downgrades and lateral changes require sufficient Jev confidence and immediate estimated savings above both an absolute and percentage threshold. If either model has unknown all-zero economics, Switchyard conservatively keeps the incumbent unless configured otherwise.
+New threads have no incumbent cache to protect. Changing thinking on the same model does not incur a model-switch penalty. An accepted capability upgrade is a hard safety floor and always switches because correctness takes priority. Downgrades are deliberately harder: one easy prompt is not enough.
 
-This policy is thread-local: origin and every temp remember their own last routed model. Returning from one logical thread to another compares against the selected thread's incumbent rather than whichever model happens to be displayed in Pi.
+A single pure `decideModelTransition()` function combines the current accepted requirement with decayed, deduplicated Jev recommendation history. It scores every eligible lower tier independently. A `cheap` recommendation supports both `cheap` and `handy`; a `handy` recommendation supports `handy` but opposes `cheap`. Harder requests reduce accumulated evidence without erasing it, so occasional hard work does not destroy a genuine light-work trend while alternating easy/hard workloads resist thrashing. The engine may choose a stable middle tier even when the current request itself could run on `cheap`.
+
+A downgrade must pass all of these gates:
+
+1. The destination can satisfy the current accepted requirement.
+2. Current Jev confidence clears the downgrade floor.
+3. Decayed support score and effective evidence weight clear their thresholds.
+4. Forecast savings cover the cold switch, a probabilistic cold return to the incumbent, and configured savings margins.
+
+This policy is thread-local: origin and every temp remember their own recommendation history, incumbent, and consecutive model cache epoch. An `A → B → A` transition starts a fresh A epoch; cache observations from the earlier A epoch are never reused. Returning from one logical thread to another compares against the selected thread's incumbent rather than whichever model happens to be displayed in Pi. `shadow` mode computes and reports proposed downgrades without executing them.
+
+If either model has unknown all-zero economics, Switchyard conservatively keeps the incumbent unless configured otherwise.
 
 Configure the policy through `/switchyard switching`. Model-specific economics overrides remain JSON-only because they are precise provider data rather than interactive preferences:
 
@@ -78,7 +89,6 @@ Configure the policy through `/switchyard switching`. Model-specific economics o
 {
   "switching": {
     "cacheAware": true,
-    "upgradesAlwaysSwitch": true,
     "downgradeConfidenceFloor": 0.7,
     "minSavingsRatio": 0.2,
     "minSavingsUsd": 0.001,
@@ -86,6 +96,14 @@ Configure the policy through `/switchyard switching`. Model-specific economics o
     "assumedWarmCacheRatio": 0.75,
     "assumedCacheWriteRatio": 0.5,
     "defaultExpectedOutputTokens": 800,
+    "downgradeMode": "enforce",
+    "evidenceDecay": 0.8,
+    "minimumEvidenceScore": 0.65,
+    "minimumEvidenceWeight": 1.5,
+    "hardRequirementPenalty": 1.5,
+    "forecastTurns": 3,
+    "returnProbabilityFloor": 0.25,
+    "returnCostMultiplier": 1,
     "economics": {
       "provider/model-id": {
         "input": 2.5,
@@ -188,7 +206,7 @@ Legacy `jev-router.json` files are still read for migration compatibility; new c
 
 - `"off"` — no routing/economics notifications.
 - `"minimal"` — persistent footer plus one compact combined decision per request.
-- `"verbose"` — persistent footer plus one multiline audit containing current/requested/selected models, confidence, token estimates, cache source, stay/switch costs, savings, and thresholds.
+- `"verbose"` — persistent footer plus one multiline audit containing current/requested/selected models, confidence, per-tier evidence scores, token estimates, cache source, stay/switch costs, forecast horizon, return reserve, net savings, and thresholds.
 
 Minimal example:
 

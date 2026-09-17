@@ -33,16 +33,24 @@ export const DEFAULT_CONFIG: RouterConfig = {
     assumedWarmCacheRatio: 0.75,
     assumedCacheWriteRatio: 0.5,
     defaultExpectedOutputTokens: 800,
+    downgradeMode: "enforce",
+    evidenceDecay: 0.8,
+    minimumEvidenceScore: 0.65,
+    minimumEvidenceWeight: 1.5,
+    hardRequirementPenalty: 1.5,
+    forecastTurns: 3,
+    returnProbabilityFloor: 0.25,
+    returnCostMultiplier: 1,
     economics: {},
   },
 };
 
 export type ConfigScope = "global" | "project";
-type SwitchingFragment = Partial<Omit<SwitchingConfig, "economics">> & {
+export type SwitchingConfigPatch = Partial<Omit<SwitchingConfig, "economics">> & {
   economics?: Record<string, ModelEconomics>;
 };
 type ConfigFragment = Omit<Partial<RouterConfig>, "switching"> & {
-  switching?: SwitchingFragment;
+  switching?: SwitchingConfigPatch;
 };
 const THINKING_SELECTIONS = new Set([
   "default",
@@ -125,10 +133,10 @@ function normalizeEconomics(value: unknown): ModelEconomics | undefined {
   };
 }
 
-function normalizeSwitching(value: unknown): SwitchingFragment | undefined {
+function normalizeSwitching(value: unknown): SwitchingConfigPatch | undefined {
   if (!value || typeof value !== "object") return undefined;
   const input = value as Record<string, unknown>;
-  const switching: SwitchingFragment = {};
+  const switching: SwitchingConfigPatch = {};
   if (typeof input.cacheAware === "boolean") switching.cacheAware = input.cacheAware;
   if (typeof input.upgradesAlwaysSwitch === "boolean") switching.upgradesAlwaysSwitch = input.upgradesAlwaysSwitch;
   if (typeof input.downgradeConfidenceFloor === "number") {
@@ -149,6 +157,30 @@ function normalizeSwitching(value: unknown): SwitchingFragment | undefined {
   }
   if (typeof input.defaultExpectedOutputTokens === "number") {
     switching.defaultExpectedOutputTokens = Math.max(0, Math.min(1_000_000, Math.trunc(input.defaultExpectedOutputTokens)));
+  }
+  if (input.downgradeMode === "enforce" || input.downgradeMode === "shadow") {
+    switching.downgradeMode = input.downgradeMode;
+  }
+  if (typeof input.evidenceDecay === "number") {
+    switching.evidenceDecay = Math.max(0, Math.min(1, input.evidenceDecay));
+  }
+  if (typeof input.minimumEvidenceScore === "number") {
+    switching.minimumEvidenceScore = Math.max(0, Math.min(1, input.minimumEvidenceScore));
+  }
+  if (typeof input.minimumEvidenceWeight === "number") {
+    switching.minimumEvidenceWeight = Math.max(0, input.minimumEvidenceWeight);
+  }
+  if (typeof input.hardRequirementPenalty === "number") {
+    switching.hardRequirementPenalty = Math.max(0, input.hardRequirementPenalty);
+  }
+  if (typeof input.forecastTurns === "number") {
+    switching.forecastTurns = Math.max(1, Math.min(100, Math.trunc(input.forecastTurns)));
+  }
+  if (typeof input.returnProbabilityFloor === "number") {
+    switching.returnProbabilityFloor = Math.max(0, Math.min(1, input.returnProbabilityFloor));
+  }
+  if (typeof input.returnCostMultiplier === "number") {
+    switching.returnCostMultiplier = Math.max(0, input.returnCostMultiplier);
   }
   if (input.economics && typeof input.economics === "object") {
     const economicsOverrides: Record<string, ModelEconomics> = {};
@@ -218,7 +250,7 @@ function readConfigFile(path: string): ConfigFragment {
   }
 }
 
-function mergeSwitching(base: SwitchingConfig, override?: SwitchingFragment): SwitchingConfig {
+function mergeSwitching(base: SwitchingConfig, override?: SwitchingConfigPatch): SwitchingConfig {
   if (!override) return { ...base, economics: { ...base.economics } };
   return {
     ...base,
@@ -228,9 +260,9 @@ function mergeSwitching(base: SwitchingConfig, override?: SwitchingFragment): Sw
 }
 
 function mergeSwitchingFragments(
-  base?: SwitchingFragment,
-  override?: SwitchingFragment,
-): SwitchingFragment | undefined {
+  base?: SwitchingConfigPatch,
+  override?: SwitchingConfigPatch,
+): SwitchingConfigPatch | undefined {
   if (!base && !override) return undefined;
   return {
     ...(base ?? {}),
@@ -281,6 +313,20 @@ function writeConfigValue(cwd: string, scope: ConfigScope, config: ConfigFragmen
 
 export function writeConfig(cwd: string, scope: ConfigScope, config: RouterConfig): string {
   return writeConfigValue(cwd, scope, config);
+}
+
+export function writeSwitchingPatch(
+  cwd: string,
+  scope: ConfigScope,
+  patch: SwitchingConfigPatch,
+): string {
+  const current = readScopeConfig(cwd, scope);
+  const switching = mergeSwitchingFragments(current.switching, patch) ?? patch;
+  return writeConfigValue(cwd, scope, {
+    ...current,
+    version: 1,
+    switching,
+  });
 }
 
 export function writeConfigPatch(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,7 @@ import {
   isConfigured,
   loadConfig,
   writeConfig,
+  writeSwitchingPatch,
 } from "../src/config.js";
 import type { RouterConfig } from "../src/types.js";
 
@@ -117,6 +118,19 @@ test("sparse switching overrides preserve inherited thresholds and economics", (
     assert.equal(loaded.switching.minSavingsRatio, 0.4);
     assert.equal(loaded.switching.minSavingsUsd, 0.02);
     assert.equal(loaded.switching.economics["custom/model"]?.output, 8);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("editing one switching setting does not freeze inherited policy values", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-switching-patch-"));
+  try {
+    writeSwitchingPatch(cwd, "project", { cacheAware: false });
+    const raw = JSON.parse(readFileSync(getConfigPath(cwd, "project"), "utf8"));
+    assert.equal(raw.switching.cacheAware, false);
+    assert.equal("minSavingsRatio" in raw.switching, false);
+    assert.equal(loadConfig(cwd, true).switching.minSavingsRatio, DEFAULT_CONFIG.switching.minSavingsRatio);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
