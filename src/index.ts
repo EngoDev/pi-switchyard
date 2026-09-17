@@ -1,17 +1,31 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { TypeSafeClient } from "@typesafe-ai/sdk";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  formatSize,
+  truncateHead,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 import { resolveTypeSafeApiKey } from "./auth.js";
 import { isConfigured, loadConfig } from "./config.js";
 import { registerConfigurationCommand } from "./configuration-ui.js";
 import { decideRoute, type RouteClient } from "./router.js";
 import {
+  formatParentContextResult,
+  PARENT_CONTEXT_ROLES,
+  selectParentContext,
+} from "./parent-context.js";
+import {
   createTempThread,
   filterMessagesForParent,
   filterMessagesForThread,
-  getMessageText,
   getParentContext,
   messagesFromEntries,
   restoreThreads,
@@ -29,6 +43,7 @@ import type {
 
 const ROUTER_ENTRY_TYPE = "jev-router";
 const STATUS_KEY = "jev-router";
+const PARENT_CONTEXT_TOOL = "get_context_from_parent";
 const CAPABILITY_ORDER: TierName[] = ["cheap", "handy", "smart", "genius"];
 
 function toRouteClient(client: TypeSafeClient): RouteClient {
@@ -89,6 +104,13 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   let lastVisibleRoute: ActiveRoute | undefined;
   let needsTreeLabel = false;
 
+  function setParentContextToolEnabled(enabled: boolean): void {
+    const active = pi.getActiveTools();
+    const isActive = active.includes(PARENT_CONTEXT_TOOL);
+    if (enabled && !isActive) pi.setActiveTools([...active, PARENT_CONTEXT_TOOL]);
+    if (!enabled && isActive) pi.setActiveTools(active.filter((name) => name !== PARENT_CONTEXT_TOOL));
+  }
+
   function clearDebugStatus(ctx: ExtensionContext): void {
     ctx.ui.setStatus(STATUS_KEY, undefined);
   }
@@ -100,6 +122,44 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     }
     ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", routeStatus(route, pi.getThinkingLevel())));
   }
+
+  pi.registerTool({
+    name: PARENT_CONTEXT_TOOL,
+    label: "Get Context From Parent",
+    description: "Retrieve a bounded, filtered slice of messages from the parent logical session. Available only in Jev-routed temp threads. Results are limited to 20 messages and 50KB.",
+    promptSnippet: "Retrieve additional context from the parent session when the temp thread's initial snapshot is insufficient",
+    promptGuidelines: [
+      "Use get_context_from_parent only when the current temp thread needs specific parent-session information that is absent from its initial snapshot.",
+      "Prefer a narrow query and small limit when using get_context_from_parent.",
+    ],
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ description: "Case-insensitive text filter" })),
+      roles: Type.Optional(Type.Array(StringEnum(PARENT_CONTEXT_ROLES))),
+      offset: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, default: 5 })),
+      order: Type.Optional(StringEnum(["newest", "oldest"] as const, { default: "newest" })),
+      includeToolResults: Type.Optional(Type.Boolean({ default: false })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!activeRoute || activeRoute.threadId === "parent") {
+        throw new Error("get_context_from_parent is only available inside a routed temp thread");
+      }
+      const items = selectParentContext(getSessionMessages(ctx), params);
+      const raw = formatParentContextResult(items);
+      const truncation = truncateHead(raw, {
+        maxBytes: DEFAULT_MAX_BYTES,
+        maxLines: DEFAULT_MAX_LINES,
+      });
+      let text = truncation.content;
+      if (truncation.truncated) {
+        text += `\n\n[Context truncated to ${formatSize(truncation.outputBytes)}. Use a narrower query, offset, or limit.]`;
+      }
+      return {
+        content: [{ type: "text", text }],
+        details: { matched: items.length, query: params },
+      };
+    },
+  });
 
   registerConfigurationCommand(pi, {
     getConfig: () => config,
@@ -122,6 +182,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     lastVisibleRoute = findLastRoute(ctx.sessionManager.getEntries());
     needsTreeLabel = false;
     routeClient = undefined;
+    setParentContextToolEnabled(false);
 
     const apiKey = resolveTypeSafeApiKey();
     if (!apiKey) {
@@ -231,6 +292,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     };
     lastVisibleRoute = activeRoute;
     needsTreeLabel = activeRoute.threadId !== "parent";
+    setParentContextToolEnabled(activeRoute.threadId !== "parent");
     pi.appendEntry(ROUTER_ENTRY_TYPE, {
       kind: "route",
       route: activeRoute,
@@ -277,11 +339,13 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", () => {
+    setParentContextToolEnabled(false);
     activeRoute = undefined;
     needsTreeLabel = false;
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    setParentContextToolEnabled(false);
     activeRoute = undefined;
     routeClient = undefined;
     clearDebugStatus(ctx);
