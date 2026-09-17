@@ -70,6 +70,13 @@ export function buildCategoryItems(config: RouterConfig): SelectItem[] {
       description: `${config.tempThreadSoftTokenLimit.toLocaleString()} tokens · ${config.tempThreadSoftTurnLimit} turns`,
     },
     {
+      value: "switching",
+      label: "cache-aware model switching",
+      description: config.switching.cacheAware
+        ? `on · ${(config.switching.minSavingsRatio * 100).toFixed(0)}% / $${config.switching.minSavingsUsd} minimum savings`
+        : "off",
+    },
+    {
       value: "show",
       label: "show configuration",
       description: "Display all current settings",
@@ -95,6 +102,16 @@ function formatConfig(config: RouterConfig): string {
     `debug: ${config.debug}`,
     `temp thread soft token limit: ${config.tempThreadSoftTokenLimit}`,
     `temp thread soft turn limit: ${config.tempThreadSoftTurnLimit}`,
+    `cache-aware switching: ${config.switching.cacheAware}`,
+    `upgrades always switch: ${config.switching.upgradesAlwaysSwitch}`,
+    `downgrade confidence floor: ${config.switching.downgradeConfidenceFloor}`,
+    `minimum switch savings ratio: ${config.switching.minSavingsRatio}`,
+    `minimum switch savings USD: ${config.switching.minSavingsUsd}`,
+    `unknown economics policy: ${config.switching.unknownCostPolicy}`,
+    `assumed warm cache ratio: ${config.switching.assumedWarmCacheRatio}`,
+    `assumed cache-write ratio: ${config.switching.assumedCacheWriteRatio}`,
+    `default expected output tokens: ${config.switching.defaultExpectedOutputTokens}`,
+    `economics overrides: ${Object.keys(config.switching.economics).length}`,
   ];
   for (const tier of TIER_NAMES) {
     const selected = config.tiers[tier];
@@ -233,6 +250,106 @@ async function editTempLimits(ctx: ExtensionCommandContext, hooks: Configuration
   );
 }
 
+async function saveSwitching(
+  ctx: ExtensionCommandContext,
+  hooks: ConfigurationHooks,
+  switching: RouterConfig["switching"],
+): Promise<void> {
+  const scope = await chooseScope(ctx, "Save cache-aware switching policy");
+  if (!scope) return;
+  const path = writeConfigPatch(ctx.cwd, scope, { switching });
+  finishConfigChange(ctx, hooks);
+  ctx.ui.notify(`Switching policy updated · ${path}`, "info");
+}
+
+async function editSwitching(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  await runCategoryMenuLoop(
+    () => {
+      const policy = hooks.getConfig().switching;
+      return showPicker(ctx, "Cache-aware model switching", [
+        { value: "cache-aware", label: "cache-aware switching", description: String(policy.cacheAware) },
+        { value: "upgrade", label: "upgrades always switch", description: String(policy.upgradesAlwaysSwitch) },
+        { value: "unknown", label: "unknown economics", description: policy.unknownCostPolicy },
+        {
+          value: "thresholds",
+          label: "economics thresholds",
+          description: `confidence ${policy.downgradeConfidenceFloor} · savings ${(policy.minSavingsRatio * 100).toFixed(0)}% / $${policy.minSavingsUsd}`,
+        },
+        {
+          value: "estimation",
+          label: "estimation defaults",
+          description: `warm cache ${(policy.assumedWarmCacheRatio * 100).toFixed(0)}% · cache writes ${(policy.assumedCacheWriteRatio * 100).toFixed(0)}% · ${policy.defaultExpectedOutputTokens} output tokens`,
+        },
+        {
+          value: "overrides",
+          label: "economics overrides",
+          description: `${Object.keys(policy.economics).length} configured in switchyard.json`,
+        },
+      ], { maxVisible: 8 });
+    },
+    async (selected) => {
+      const policy = hooks.getConfig().switching;
+      if (selected === "cache-aware" || selected === "upgrade") {
+        const current = selected === "cache-aware" ? policy.cacheAware : policy.upgradesAlwaysSwitch;
+        const value = await showPicker(ctx, selected === "cache-aware" ? "Enable cache-aware switching" : "Always allow capability upgrades", [
+          { value: "true", label: "true" },
+          { value: "false", label: "false" },
+        ], { maxVisible: 4, preselect: String(current) });
+        if (!value) return;
+        await saveSwitching(ctx, hooks, {
+          ...policy,
+          ...(selected === "cache-aware"
+            ? { cacheAware: value === "true" }
+            : { upgradesAlwaysSwitch: value === "true" }),
+        });
+      } else if (selected === "unknown") {
+        const value = await showPicker(ctx, "When model economics are unknown", [
+          { value: "stay", label: "stay", description: "Preserve the incumbent model" },
+          { value: "switch", label: "switch", description: "Use Jev's candidate" },
+        ], { maxVisible: 4, preselect: policy.unknownCostPolicy });
+        if (!value) return;
+        await saveSwitching(ctx, hooks, { ...policy, unknownCostPolicy: value as "stay" | "switch" });
+      } else if (selected === "thresholds") {
+        const value = await ctx.ui.input(
+          "Downgrade confidence,min savings ratio,min savings USD",
+          `${policy.downgradeConfidenceFloor},${policy.minSavingsRatio},${policy.minSavingsUsd}`,
+        );
+        if (value === undefined) return;
+        const parts = value.split(",").map((part) => Number(part.trim()));
+        if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+          ctx.ui.notify("Enter three non-negative numbers, for example 0.7,0.2,0.001", "error");
+          return;
+        }
+        await saveSwitching(ctx, hooks, {
+          ...policy,
+          downgradeConfidenceFloor: Math.min(1, parts[0]!),
+          minSavingsRatio: Math.min(1, parts[1]!),
+          minSavingsUsd: parts[2]!,
+        });
+      } else if (selected === "estimation") {
+        const value = await ctx.ui.input(
+          "Assumed warm cache ratio,cache-write ratio,default expected output tokens",
+          `${policy.assumedWarmCacheRatio},${policy.assumedCacheWriteRatio},${policy.defaultExpectedOutputTokens}`,
+        );
+        if (value === undefined) return;
+        const parts = value.split(",").map((part) => Number(part.trim()));
+        if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+          ctx.ui.notify("Enter three non-negative numbers, for example 0.75,0.5,800", "error");
+          return;
+        }
+        await saveSwitching(ctx, hooks, {
+          ...policy,
+          assumedWarmCacheRatio: Math.min(1, parts[0]!),
+          assumedCacheWriteRatio: Math.min(1, parts[1]!),
+          defaultExpectedOutputTokens: Math.trunc(parts[2]!),
+        });
+      } else if (selected === "overrides") {
+        ctx.ui.notify("Edit switching.economics in switchyard.json; values override Pi model pricing.", "info");
+      }
+    },
+  );
+}
+
 async function editEnabled(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
   const selected = await showPicker(ctx, "Enable Switchyard", [
     { value: "true", label: "enabled" },
@@ -271,7 +388,7 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
       ctx,
       "Choose Switchyard category to change",
       buildCategoryItems(hooks.getConfig()),
-      { maxVisible: 10 },
+      { maxVisible: 11 },
     ),
     async (selected) => {
       if (selected.startsWith("tier:")) {
@@ -282,6 +399,8 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
         await editEnabled(ctx, hooks);
       } else if (selected === "temp-limits") {
         await editTempLimits(ctx, hooks);
+      } else if (selected === "switching") {
+        await editSwitching(ctx, hooks);
       } else if (selected === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       }
@@ -304,12 +423,14 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
         await editDebug(ctx, hooks);
       } else if (direct === "limits") {
         await editTempLimits(ctx, hooks);
+      } else if (direct === "switching") {
+        await editSwitching(ctx, hooks);
       } else if (direct === "on" || direct === "off") {
         await saveEnabled(ctx, hooks, direct === "on");
       } else if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       } else {
-        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|limits|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|limits|switching|on|off|show]", "error");
       }
     },
   });

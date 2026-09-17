@@ -55,6 +55,51 @@ Thread routing is probabilistic. Low-confidence target choices deliberately stay
 
 Choose the mapping that fits your account, providers, latency tolerance, and risk. For example, one user might map every tier to a different model at default thinking; another may use the same model with `xhigh`, `high`, and lower thinking configurations. When Jev has low confidence in a tier, Switchyard escalates one tier rather than taking an underpowered gamble.
 
+### Cache-aware model switching
+
+Jev's ideal tier is not automatically a cost-effective model switch. On an existing logical thread, changing models can turn a warm cached prefix into a cold request. Switchyard therefore compares Jev's candidate with that thread's incumbent before calling `pi.setModel()`.
+
+The estimate combines:
+
+- Pi's resolved per-million-token `input`, `output`, `cacheRead`, and `cacheWrite` prices
+- Any request-wide long-context pricing tier that applies
+- Optional `switching.economics` overrides from `switchyard.json`
+- The selected logical thread's estimated context and current prompt size
+- Its recent observed cache-read ratio, or a configurable conservative assumption
+- Its recent average output size, or a configurable default
+
+New threads have no incumbent cache to protect. Changing thinking on the same model does not incur a model-switch penalty. Capability upgrades switch by default because correctness takes priority. Downgrades and lateral changes require sufficient Jev confidence and immediate estimated savings above both an absolute and percentage threshold. If either model has unknown all-zero economics, Switchyard conservatively keeps the incumbent unless configured otherwise.
+
+This policy is thread-local: origin and every temp remember their own last routed model. Returning from one logical thread to another compares against the selected thread's incumbent rather than whichever model happens to be displayed in Pi.
+
+Configure the policy through `/switchyard switching`. Model-specific economics overrides remain JSON-only because they are precise provider data rather than interactive preferences:
+
+```json
+{
+  "switching": {
+    "cacheAware": true,
+    "upgradesAlwaysSwitch": true,
+    "downgradeConfidenceFloor": 0.7,
+    "minSavingsRatio": 0.2,
+    "minSavingsUsd": 0.001,
+    "unknownCostPolicy": "stay",
+    "assumedWarmCacheRatio": 0.75,
+    "assumedCacheWriteRatio": 0.5,
+    "defaultExpectedOutputTokens": 800,
+    "economics": {
+      "provider/model-id": {
+        "input": 2.5,
+        "output": 10,
+        "cacheRead": 0.25,
+        "cacheWrite": 3
+      }
+    }
+  }
+}
+```
+
+Overrides take precedence over Pi metadata. Switchyard does not maintain a static model-price list. Input, cache-read, and cache-write tokens are estimated as separate pricing buckets; a nonzero cache-write price is never applied to every uncached token. Observed zero cache hits remain zero rather than being replaced by the warm-cache assumption. Compaction or branch summaries invalidate the old warmth estimate until the incumbent produces a new post-summary usage observation.
+
 ### What users see and what stays isolated
 
 The normal Pi transcript, working indicator, reasoning display, and tool calls remain native Pi UI. In regular mode the routing itself is intentionally quiet. In `debug: true`, Switchyard exposes the selected thread, tier, model, thinking level, and routing confidence in the footer/notification.
@@ -72,6 +117,7 @@ Temp turns are marked as `temp:<thread-name>` in `/tree`. The messages are store
 - Makes `get_context_from_origin` available only during temp-thread turns for bounded, filtered retrieval.
 - Labels both temp user prompts and assistant answers as `temp:<thread-name>` in `/tree`.
 - Sends only bounded excerpts to Jev after best-effort credential redaction.
+- Applies cache-aware, per-thread hysteresis before changing models on existing threads.
 - Performs no automatic routing, model switching, or context filtering when the TypeSafe key is absent or a Jev request fails or times out.
 
 ## Requirements
@@ -124,6 +170,7 @@ Direct command forms:
 /switchyard show
 /switchyard debug
 /switchyard limits
+/switchyard switching
 /switchyard on
 /switchyard off
 ```
@@ -141,6 +188,7 @@ When `debug` is true, the footer shows the active logical thread, tier, model, a
 
 ```text
 Switchyard route → temp:did-create-pr | cheap | openai/gpt-5.6-luna | thinking:high | confidence target:0.97 tier:0.99
+Switchyard model policy: requested cheap/provider/luna; selected smart/provider/sol (insufficient-savings) · warm stay $0.0120 · cold switch $0.0310
 ```
 
 When `debug` is false, routing remains visually transparent except for normal Pi model/footer changes and `/tree` labels.

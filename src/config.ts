@@ -3,7 +3,14 @@ import { dirname, join } from "node:path";
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { TIER_NAMES, type RouterConfig, type TierConfig, type TierName } from "./types.js";
+import {
+  TIER_NAMES,
+  type ModelEconomics,
+  type RouterConfig,
+  type SwitchingConfig,
+  type TierConfig,
+  type TierName,
+} from "./types.js";
 
 export const DEFAULT_CONFIG: RouterConfig = {
   version: 1,
@@ -16,9 +23,27 @@ export const DEFAULT_CONFIG: RouterConfig = {
   tierConfidenceFloor: 0.45,
   tempThreadSoftTokenLimit: 32_000,
   tempThreadSoftTurnLimit: 12,
+  switching: {
+    cacheAware: true,
+    upgradesAlwaysSwitch: true,
+    downgradeConfidenceFloor: 0.7,
+    minSavingsRatio: 0.2,
+    minSavingsUsd: 0.001,
+    unknownCostPolicy: "stay",
+    assumedWarmCacheRatio: 0.75,
+    assumedCacheWriteRatio: 0.5,
+    defaultExpectedOutputTokens: 800,
+    economics: {},
+  },
 };
 
 export type ConfigScope = "global" | "project";
+type SwitchingFragment = Partial<Omit<SwitchingConfig, "economics">> & {
+  economics?: Record<string, ModelEconomics>;
+};
+type ConfigFragment = Omit<Partial<RouterConfig>, "switching"> & {
+  switching?: SwitchingFragment;
+};
 const THINKING_SELECTIONS = new Set([
   "default",
   "off",
@@ -55,7 +80,88 @@ function isTierConfig(value: unknown): value is TierConfig {
   );
 }
 
-function normalizePartial(value: unknown): Partial<RouterConfig> {
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function normalizeEconomics(value: unknown): ModelEconomics | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const base = nonNegativeNumber(input.input);
+  const output = nonNegativeNumber(input.output);
+  const cacheRead = nonNegativeNumber(input.cacheRead);
+  const cacheWrite = nonNegativeNumber(input.cacheWrite);
+  if (base === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) return undefined;
+  const tiers = Array.isArray(input.tiers)
+    ? input.tiers.flatMap((raw) => {
+        if (!raw || typeof raw !== "object") return [];
+        const tier = raw as Record<string, unknown>;
+        const inputTokensAbove = nonNegativeNumber(tier.inputTokensAbove);
+        const tierInput = nonNegativeNumber(tier.input);
+        const tierOutput = nonNegativeNumber(tier.output);
+        const tierCacheRead = nonNegativeNumber(tier.cacheRead);
+        const tierCacheWrite = nonNegativeNumber(tier.cacheWrite);
+        return inputTokensAbove === undefined
+          || tierInput === undefined
+          || tierOutput === undefined
+          || tierCacheRead === undefined
+          || tierCacheWrite === undefined
+          ? []
+          : [{
+              inputTokensAbove: Math.trunc(inputTokensAbove),
+              input: tierInput,
+              output: tierOutput,
+              cacheRead: tierCacheRead,
+              cacheWrite: tierCacheWrite,
+            }];
+      })
+    : [];
+  return {
+    input: base,
+    output,
+    cacheRead,
+    cacheWrite,
+    ...(tiers.length > 0 ? { tiers } : {}),
+  };
+}
+
+function normalizeSwitching(value: unknown): SwitchingFragment | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const switching: SwitchingFragment = {};
+  if (typeof input.cacheAware === "boolean") switching.cacheAware = input.cacheAware;
+  if (typeof input.upgradesAlwaysSwitch === "boolean") switching.upgradesAlwaysSwitch = input.upgradesAlwaysSwitch;
+  if (typeof input.downgradeConfidenceFloor === "number") {
+    switching.downgradeConfidenceFloor = Math.max(0, Math.min(1, input.downgradeConfidenceFloor));
+  }
+  if (typeof input.minSavingsRatio === "number") {
+    switching.minSavingsRatio = Math.max(0, Math.min(1, input.minSavingsRatio));
+  }
+  if (typeof input.minSavingsUsd === "number") switching.minSavingsUsd = Math.max(0, input.minSavingsUsd);
+  if (input.unknownCostPolicy === "stay" || input.unknownCostPolicy === "switch") {
+    switching.unknownCostPolicy = input.unknownCostPolicy;
+  }
+  if (typeof input.assumedWarmCacheRatio === "number") {
+    switching.assumedWarmCacheRatio = Math.max(0, Math.min(1, input.assumedWarmCacheRatio));
+  }
+  if (typeof input.assumedCacheWriteRatio === "number") {
+    switching.assumedCacheWriteRatio = Math.max(0, Math.min(1, input.assumedCacheWriteRatio));
+  }
+  if (typeof input.defaultExpectedOutputTokens === "number") {
+    switching.defaultExpectedOutputTokens = Math.max(0, Math.min(1_000_000, Math.trunc(input.defaultExpectedOutputTokens)));
+  }
+  if (input.economics && typeof input.economics === "object") {
+    const economicsOverrides: Record<string, ModelEconomics> = {};
+    for (const [model, raw] of Object.entries(input.economics as Record<string, unknown>)) {
+      const economics = normalizeEconomics(raw);
+      if (economics) economicsOverrides[model] = economics;
+    }
+    switching.economics = economicsOverrides;
+  }
+  return switching;
+}
+
+function normalizePartial(value: unknown): ConfigFragment {
   if (!value || typeof value !== "object") return {};
   const input = value as Record<string, unknown>;
   const tiers: Partial<Record<TierName, TierConfig>> = {};
@@ -66,7 +172,7 @@ function normalizePartial(value: unknown): Partial<RouterConfig> {
     }
   }
 
-  const result: Partial<RouterConfig> = { tiers };
+  const result: ConfigFragment = { tiers };
   if (typeof input.enabled === "boolean") result.enabled = input.enabled;
   if (typeof input.debug === "boolean") result.debug = input.debug;
   if (typeof input.routerContextMessages === "number") {
@@ -94,10 +200,12 @@ function normalizePartial(value: unknown): Partial<RouterConfig> {
       ? 0
       : Math.max(1, Math.min(1_000, Math.trunc(input.tempThreadSoftTurnLimit)));
   }
+  const switching = normalizeSwitching(input.switching);
+  if (switching) result.switching = switching;
   return result;
 }
 
-function readConfigFile(path: string): Partial<RouterConfig> {
+function readConfigFile(path: string): ConfigFragment {
   if (!existsSync(path)) return {};
   try {
     return normalizePartial(JSON.parse(readFileSync(path, "utf8")));
@@ -106,13 +214,36 @@ function readConfigFile(path: string): Partial<RouterConfig> {
   }
 }
 
-export function readScopeConfig(cwd: string, scope: ConfigScope): Partial<RouterConfig> {
+function mergeSwitching(base: SwitchingConfig, override?: SwitchingFragment): SwitchingConfig {
+  if (!override) return { ...base, economics: { ...base.economics } };
+  return {
+    ...base,
+    ...override,
+    economics: { ...base.economics, ...(override.economics ?? {}) },
+  };
+}
+
+function mergeSwitchingFragments(
+  base?: SwitchingFragment,
+  override?: SwitchingFragment,
+): SwitchingFragment | undefined {
+  if (!base && !override) return undefined;
+  return {
+    ...(base ?? {}),
+    ...(override ?? {}),
+    economics: { ...(base?.economics ?? {}), ...(override?.economics ?? {}) },
+  };
+}
+
+export function readScopeConfig(cwd: string, scope: ConfigScope): ConfigFragment {
   const legacy = readConfigFile(getLegacyConfigPath(cwd, scope));
   const current = readConfigFile(getConfigPath(cwd, scope));
+  const switching = mergeSwitchingFragments(legacy.switching, current.switching);
   return {
     ...legacy,
     ...current,
     tiers: { ...legacy.tiers, ...current.tiers },
+    ...(switching ? { switching } : {}),
   };
 }
 
@@ -129,10 +260,14 @@ export function loadConfig(cwd: string, includeProject = false): RouterConfig {
       ...globalConfig.tiers,
       ...projectConfig.tiers,
     },
+    switching: mergeSwitching(
+      mergeSwitching(DEFAULT_CONFIG.switching, globalConfig.switching),
+      projectConfig.switching,
+    ),
   };
 }
 
-function writeConfigValue(cwd: string, scope: ConfigScope, config: Partial<RouterConfig>): string {
+function writeConfigValue(cwd: string, scope: ConfigScope, config: ConfigFragment | RouterConfig): string {
   const path = getConfigPath(cwd, scope);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -151,11 +286,18 @@ export function writeConfigPatch(
 ): string {
   const current = readScopeConfig(cwd, scope);
   const tiers = patch.tiers ? { ...current.tiers, ...patch.tiers } : current.tiers;
-  const next: Partial<RouterConfig> = {
+  const switching = patch.switching
+    ? mergeSwitching(
+        mergeSwitching(DEFAULT_CONFIG.switching, current.switching),
+        patch.switching,
+      )
+    : current.switching;
+  const next: ConfigFragment = {
     ...current,
     ...patch,
     version: 1,
     ...(tiers ? { tiers } : {}),
+    ...(switching ? { switching } : {}),
   };
   return writeConfigValue(cwd, scope, next);
 }

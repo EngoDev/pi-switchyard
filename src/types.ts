@@ -10,6 +10,33 @@ export interface TierConfig {
   thinking: ThinkingSelection;
 }
 
+export interface ModelEconomics {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  tiers?: Array<{
+    inputTokensAbove: number;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  }>;
+}
+
+export interface SwitchingConfig {
+  cacheAware: boolean;
+  upgradesAlwaysSwitch: boolean;
+  downgradeConfidenceFloor: number;
+  minSavingsRatio: number;
+  minSavingsUsd: number;
+  unknownCostPolicy: "stay" | "switch";
+  assumedWarmCacheRatio: number;
+  assumedCacheWriteRatio: number;
+  defaultExpectedOutputTokens: number;
+  economics: Record<string, ModelEconomics>;
+}
+
 export interface RouterConfig {
   version: 1;
   enabled: boolean;
@@ -21,6 +48,7 @@ export interface RouterConfig {
   tierConfidenceFloor: number;
   tempThreadSoftTokenLimit: number;
   tempThreadSoftTurnLimit: number;
+  switching: SwitchingConfig;
 }
 
 export interface TempThread {

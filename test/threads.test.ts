@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   filterMessagesForOrigin,
   filterMessagesForThread,
+  findLastRouteForThread,
   findMissingTempLabels,
   getOriginContext,
   makeThreadName,
@@ -229,6 +230,43 @@ test("legacy custom-message temp metadata is restored into Switchyard metadata",
   }]);
   assert.equal((messages[0] as TaggedAgentMessage | undefined)?.switchyard?.threadId, "t1");
   assert.deepEqual(filterMessagesForOrigin(messages), []);
+});
+
+test("per-thread incumbent routes are reconstructed independently", () => {
+  const routeEntry = (id: string, threadId: string, tier: "smart" | "cheap") => ({
+    type: "custom" as const,
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    customType: "switchyard",
+    data: {
+      kind: "route" as const,
+      route: {
+        threadId,
+        threadName: threadId,
+        tier,
+        provider: "test",
+        modelId: tier,
+        thinking: "default" as const,
+        decision: {
+          target: threadId,
+          tier,
+          targetConfidence: 1,
+          tierConfidence: 1,
+          targetProbabilities: { [threadId]: 1 },
+          tierProbabilities: { genius: 0, smart: tier === "smart" ? 1 : 0, handy: 0, cheap: tier === "cheap" ? 1 : 0 },
+        },
+      },
+      prompt: "prompt",
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const entries = [
+    routeEntry("origin-route", "origin", "smart"),
+    routeEntry("temp-route", "t1", "cheap"),
+  ];
+  assert.equal(findLastRouteForThread(entries, "origin")?.modelId, "smart");
+  assert.equal(findLastRouteForThread(entries, "t1")?.modelId, "cheap");
 });
 
 test("thread names are readable and unique", () => {

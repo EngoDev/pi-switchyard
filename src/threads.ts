@@ -4,6 +4,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type {
+  ActiveRoute,
   OriginContextItem,
   RouterMessageMetadata,
   RouterSessionEntryData,
@@ -150,6 +151,30 @@ export function updateThreadFromMessage(thread: TempThread, message: AgentMessag
   thread.updatedAt = new Date(message.timestamp).toISOString();
   if (message.role === "user" || message.role === "custom") thread.lastUserText = text;
   if (message.role === "assistant") thread.lastAssistantText = text;
+}
+
+export function findLastRouteForThread(
+  entries: readonly SessionEntry[],
+  threadId: string,
+): ActiveRoute | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (
+      entry?.type !== "custom"
+      || (entry.customType !== "switchyard" && entry.customType !== "jev-router")
+    ) continue;
+    const data = entry.data as RouterSessionEntryData | undefined;
+    if (data?.kind !== "route") continue;
+    const routeThreadId = data.route.threadId === ("parent" as string) ? "origin" : data.route.threadId;
+    if (routeThreadId === threadId) {
+      return {
+        ...data.route,
+        threadId: routeThreadId,
+        threadName: routeThreadId === "origin" ? "origin" : data.route.threadName,
+      };
+    }
+  }
+  return undefined;
 }
 
 export function restoreThreads(entries: readonly SessionEntry[]): Map<string, TempThread> {

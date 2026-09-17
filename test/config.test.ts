@@ -80,6 +80,67 @@ test("temp thread limits load compatibly and normalize configured values", () =>
   }
 });
 
+test("sparse switching overrides preserve inherited thresholds and economics", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-sparse-switching-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(getLegacyConfigPath(cwd, "project"), JSON.stringify({
+      switching: {
+        minSavingsRatio: 0.4,
+        minSavingsUsd: 0.02,
+        economics: {
+          "custom/model": { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 2.5 },
+        },
+      },
+    }));
+    writeFileSync(getConfigPath(cwd, "project"), JSON.stringify({
+      switching: { cacheAware: false },
+    }));
+    const loaded = loadConfig(cwd, true);
+    assert.equal(loaded.switching.cacheAware, false);
+    assert.equal(loaded.switching.minSavingsRatio, 0.4);
+    assert.equal(loaded.switching.minSavingsUsd, 0.02);
+    assert.equal(loaded.switching.economics["custom/model"]?.output, 8);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cache-aware switching policy and economics overrides round-trip", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-economics-"));
+  try {
+    writeConfig(cwd, "project", {
+      ...configured,
+      switching: {
+        ...DEFAULT_CONFIG.switching,
+        downgradeConfidenceFloor: 0.8,
+        minSavingsRatio: 0.3,
+        economics: {
+          "custom/model": {
+            input: 2,
+            output: 8,
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            tiers: [{
+              inputTokensAbove: 200_000,
+              input: 4,
+              output: 12,
+              cacheRead: 0.4,
+              cacheWrite: 5,
+            }],
+          },
+        },
+      },
+    });
+    const loaded = loadConfig(cwd, true);
+    assert.equal(loaded.switching.downgradeConfidenceFloor, 0.8);
+    assert.equal(loaded.switching.minSavingsRatio, 0.3);
+    assert.equal(loaded.switching.economics["custom/model"]?.tiers?.[0]?.input, 4);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("missing model tiers leave automatic routing unconfigured", () => {
   assert.equal(isConfigured(DEFAULT_CONFIG), false);
 });
