@@ -28,11 +28,11 @@ The key is read without being printed, logged, or copied into extension configur
 pnpm install
 ```
 
-For local development, link `src/` as a global Pi extension directory:
+For local development, link the package root as a global Pi extension directory. Linking only `src/` breaks dependency resolution because Pi resolves packages from the extension's logical path:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
-ln -s /absolute/path/to/pi-jev-router/src ~/.pi/agent/extensions/jev-router
+ln -s /absolute/path/to/pi-jev-router ~/.pi/agent/extensions/jev-router
 ```
 
 Then run `/reload` in Pi.
@@ -111,6 +111,7 @@ Retrieved context becomes part of the current temp thread and is not sent to the
 
 ```bash
 pnpm check
+pnpm check:global-load
 pnpm evaluate:live  # uses the configured TypeSafe key and consumes API usage
 ```
 

@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "check": "pnpm typecheck && pnpm test",
+    "check:global-load": "cd /tmp && pi -p --no-session '/jev-router show'",
     "evaluate:live": "tsx scripts/evaluate-live.ts"
   },
   "dependencies": {
@@ -30,7 +31,7 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./index.ts"
     ]
   }
 }

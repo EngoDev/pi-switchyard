@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import jevRouterExtension, { formatRouteStatus } from "../src/index.js";
+import jevRouterExtension, { formatRouteStatus } from "../index.js";
 
 test("exports a Pi extension factory", () => {
   assert.equal(typeof jevRouterExtension, "function");
