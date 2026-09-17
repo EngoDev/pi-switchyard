@@ -35,10 +35,10 @@ test("project configuration round-trips including debug and model tiers", () => 
 test("untrusted project configuration is ignored", () => {
   const cwd = mkdtempSync(join(tmpdir(), "jev-router-untrusted-"));
   try {
+    const globalOnly = loadConfig(cwd, false);
     writeConfig(cwd, "project", configured);
     const loaded = loadConfig(cwd, false);
-    assert.equal(loaded.debug, DEFAULT_CONFIG.debug);
-    assert.equal(isConfigured(loaded), false);
+    assert.deepEqual(loaded, globalOnly);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

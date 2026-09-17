@@ -3,18 +3,20 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import type { SelectItem } from "@earendil-works/pi-tui";
 
 import { writeConfigPatch, type ConfigScope } from "./config.js";
+import { showPicker } from "./picker.js";
 import {
   TIER_NAMES,
   type RouterConfig,
   type ThinkingSelection,
-  type TierConfig,
   type TierName,
 } from "./types.js";
 
 const STANDARD_THINKING = ["off", "minimal", "low", "medium", "high"] as const;
 const EXTENDED_THINKING = ["xhigh", "max"] as const;
+export const MODEL_PICKER_MAX_VISIBLE = 10;
 
 export function getThinkingSelections(model: Model<any>): ThinkingSelection[] {
   if (!model.reasoning) return ["default", "off"];
@@ -39,31 +41,47 @@ function availableModels(ctx: ExtensionCommandContext): Model<any>[] {
   );
 }
 
-function modelLabel(model: Model<any>): string {
-  const id = `${model.provider}/${model.id}`;
-  return model.name && model.name !== model.id ? `${id} — ${model.name}` : id;
+export function buildCategoryItems(config: RouterConfig): SelectItem[] {
+  const tierItems: SelectItem[] = TIER_NAMES.map((tier) => {
+    const current = config.tiers[tier];
+    return {
+      value: `tier:${tier}`,
+      label: tier,
+      description: current
+        ? `${current.provider}/${current.modelId} · thinking:${current.thinking}`
+        : "not configured",
+    };
+  });
+  return [
+    ...tierItems,
+    {
+      value: "debug",
+      label: "debug",
+      description: String(config.debug),
+    },
+    {
+      value: "enabled",
+      label: "router enabled",
+      description: String(config.enabled),
+    },
+    {
+      value: "show",
+      label: "show configuration",
+      description: "Display all current settings",
+    },
+  ];
 }
 
-async function chooseModel(
-  ctx: ExtensionCommandContext,
-  tier: TierName,
-  models: readonly Model<any>[],
-): Promise<Model<any> | undefined> {
-  const byLabel = new Map(models.map((model) => [modelLabel(model), model]));
-  const selected = await ctx.ui.select(`${tier}: choose model`, [...byLabel.keys()]);
-  return selected ? byLabel.get(selected) : undefined;
-}
-
-async function chooseThinking(
-  ctx: ExtensionCommandContext,
-  tier: TierName,
-  model: Model<any>,
-): Promise<ThinkingSelection | undefined> {
-  const selected = await ctx.ui.select(
-    `${tier}: thinking for ${model.provider}/${model.id}`,
-    getThinkingSelections(model),
-  );
-  return selected as ThinkingSelection | undefined;
+function modelItems(models: readonly Model<any>[], current?: { provider: string; modelId: string }): SelectItem[] {
+  return models.map((model) => {
+    const isCurrent = current?.provider === model.provider && current.modelId === model.id;
+    const name = model.name && model.name !== model.id ? ` · ${model.name}` : "";
+    return {
+      value: `${model.provider}/${model.id}`,
+      label: model.id,
+      description: `${model.provider}${name}${isCurrent ? " · current" : ""}`,
+    };
+  });
 }
 
 function formatConfig(config: RouterConfig): string {
@@ -86,7 +104,10 @@ export interface ConfigurationHooks {
 }
 
 async function chooseScope(ctx: ExtensionCommandContext, title: string): Promise<ConfigScope | undefined> {
-  const scope = await ctx.ui.select(title, ["global", "project"]);
+  const scope = await showPicker(ctx, title, [
+    { value: "global", label: "global", description: "Use across Pi projects" },
+    { value: "project", label: "project", description: "Override only in this trusted project" },
+  ], { maxVisible: 4 });
   if (!scope) return undefined;
   if (scope === "project" && !ctx.isProjectTrusted()) {
     ctx.ui.notify("Project configuration requires a trusted project", "error");
@@ -100,13 +121,83 @@ function finishConfigChange(ctx: ExtensionCommandContext, hooks: ConfigurationHo
   hooks.onDebugChanged(ctx);
 }
 
-async function saveDebugToggle(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
-  const enabled = !hooks.getConfig().debug;
+async function editTier(
+  ctx: ExtensionCommandContext,
+  hooks: ConfigurationHooks,
+  tier: TierName,
+): Promise<void> {
+  const models = availableModels(ctx);
+  if (models.length === 0) {
+    ctx.ui.notify("No authenticated Pi models are available", "error");
+    return;
+  }
+
+  const current = hooks.getConfig().tiers[tier];
+  const selectedRef = await showPicker(
+    ctx,
+    `${tier}: choose model`,
+    modelItems(models, current),
+    {
+      searchable: true,
+      maxVisible: MODEL_PICKER_MAX_VISIBLE,
+      ...(current ? { preselect: `${current.provider}/${current.modelId}` } : {}),
+      description: "Type any part of the provider, model ID, or model name to filter.",
+    },
+  );
+  if (!selectedRef) return;
+  const model = models.find((candidate) => `${candidate.provider}/${candidate.id}` === selectedRef);
+  if (!model) return;
+
+  const thinking = await showPicker(
+    ctx,
+    `${tier}: choose thinking`,
+    getThinkingSelections(model).map((value) => ({
+      value,
+      label: value,
+      ...(value === "default" ? { description: "Use Pi's default for this model" } : {}),
+    })),
+    {
+      maxVisible: 9,
+      ...(current?.thinking ? { preselect: current.thinking } : {}),
+      description: `${model.provider}/${model.id}`,
+    },
+  ) as ThinkingSelection | undefined;
+  if (!thinking) return;
+
+  const scope = await chooseScope(ctx, `Save ${tier} configuration`);
+  if (!scope) return;
+  const path = writeConfigPatch(ctx.cwd, scope, {
+    tiers: {
+      [tier]: { provider: model.provider, modelId: model.id, thinking },
+    },
+  });
+  finishConfigChange(ctx, hooks);
+  ctx.ui.notify(
+    `${tier} → ${model.provider}/${model.id} (${thinking}) · ${path}`,
+    "info",
+  );
+}
+
+async function editDebug(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  const selected = await showPicker(ctx, "Debug routing indication", [
+    { value: "false", label: "false", description: "Hide route decisions" },
+    { value: "true", label: "true", description: "Show thread, model, thinking, and confidence" },
+  ], { maxVisible: 4, preselect: String(hooks.getConfig().debug) });
+  if (!selected) return;
   const scope = await chooseScope(ctx, "Save debug setting");
   if (!scope) return;
-  const path = writeConfigPatch(ctx.cwd, scope, { debug: enabled });
+  const path = writeConfigPatch(ctx.cwd, scope, { debug: selected === "true" });
   finishConfigChange(ctx, hooks);
-  ctx.ui.notify(`Jev router debug ${hooks.getConfig().debug ? "enabled" : "disabled"} (${path})`, "info");
+  ctx.ui.notify(`Jev router debug ${hooks.getConfig().debug ? "enabled" : "disabled"} · ${path}`, "info");
+}
+
+async function editEnabled(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  const selected = await showPicker(ctx, "Enable Jev router", [
+    { value: "true", label: "enabled" },
+    { value: "false", label: "disabled" },
+  ], { maxVisible: 4, preselect: String(hooks.getConfig().enabled) });
+  if (!selected) return;
+  await saveEnabled(ctx, hooks, selected === "true");
 }
 
 async function saveEnabled(
@@ -118,50 +209,26 @@ async function saveEnabled(
   if (!scope) return;
   const path = writeConfigPatch(ctx.cwd, scope, { enabled });
   finishConfigChange(ctx, hooks);
-  ctx.ui.notify(`Jev router ${hooks.getConfig().enabled ? "enabled" : "disabled"} (${path})`, "info");
+  ctx.ui.notify(`Jev router ${hooks.getConfig().enabled ? "enabled" : "disabled"} · ${path}`, "info");
 }
 
-async function runConfigurationWizard(
-  ctx: ExtensionCommandContext,
-  hooks: ConfigurationHooks,
-): Promise<void> {
-  const scope = await chooseScope(ctx, "Save Jev router configuration");
-  if (!scope) return;
-
-  const models = availableModels(ctx);
-  if (models.length === 0) {
-    ctx.ui.notify("No authenticated Pi models are available", "error");
-    return;
+async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  const selected = await showPicker(
+    ctx,
+    "Choose Jev router category to change",
+    buildCategoryItems(hooks.getConfig()),
+    { maxVisible: 9 },
+  );
+  if (!selected) return;
+  if (selected.startsWith("tier:")) {
+    await editTier(ctx, hooks, selected.slice("tier:".length) as TierName);
+  } else if (selected === "debug") {
+    await editDebug(ctx, hooks);
+  } else if (selected === "enabled") {
+    await editEnabled(ctx, hooks);
+  } else if (selected === "show") {
+    ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
   }
-
-  const tiers: Partial<Record<TierName, TierConfig>> = {};
-  for (const tier of TIER_NAMES) {
-    const model = await chooseModel(ctx, tier, models);
-    if (!model) {
-      ctx.ui.notify("Configuration cancelled", "info");
-      return;
-    }
-    const thinking = await chooseThinking(ctx, tier, model);
-    if (!thinking) {
-      ctx.ui.notify("Configuration cancelled", "info");
-      return;
-    }
-    tiers[tier] = { provider: model.provider, modelId: model.id, thinking };
-  }
-
-  const debugSelection = await ctx.ui.select("Show routing debug status?", ["false", "true"]);
-  if (!debugSelection) {
-    ctx.ui.notify("Configuration cancelled", "info");
-    return;
-  }
-
-  const path = writeConfigPatch(ctx.cwd, scope, {
-    enabled: true,
-    debug: debugSelection === "true",
-    tiers,
-  });
-  finishConfigChange(ctx, hooks);
-  ctx.ui.notify(`Saved Jev router configuration to ${path}`, "info");
 }
 
 export function registerConfigurationCommand(pi: ExtensionAPI, hooks: ConfigurationHooks): void {
@@ -169,26 +236,18 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
     description: "Configure and inspect the Jev session/model router",
     handler: async (args, ctx) => {
       const direct = args.trim().toLowerCase();
-      if (direct === "configure") return runConfigurationWizard(ctx, hooks);
-      if (direct === "debug") return saveDebugToggle(ctx, hooks);
-      if (direct === "on" || direct === "off") return saveEnabled(ctx, hooks, direct === "on");
-      if (direct === "show") {
+      if ((TIER_NAMES as readonly string[]).includes(direct)) {
+        await editTier(ctx, hooks, direct as TierName);
+      } else if (!direct || direct === "configure") {
+        await showCategoryMenu(ctx, hooks);
+      } else if (direct === "debug") {
+        await editDebug(ctx, hooks);
+      } else if (direct === "on" || direct === "off") {
+        await saveEnabled(ctx, hooks, direct === "on");
+      } else if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
-        return;
-      }
-
-      const action = await ctx.ui.select("Jev router", [
-        "configure tiers",
-        "toggle debug",
-        hooks.getConfig().enabled ? "disable router" : "enable router",
-        "show configuration",
-      ]);
-      if (action === "configure tiers") await runConfigurationWizard(ctx, hooks);
-      else if (action === "toggle debug") await saveDebugToggle(ctx, hooks);
-      else if (action === "disable router" || action === "enable router") {
-        await saveEnabled(ctx, hooks, action === "enable router");
-      } else if (action === "show configuration") {
-        ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
+      } else {
+        ctx.ui.notify("Usage: /jev-router [genius|smart|handy|cheap|debug|on|off|show]", "error");
       }
     },
   });

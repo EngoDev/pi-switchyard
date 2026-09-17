@@ -45,17 +45,21 @@ Run:
 /jev-router
 ```
 
-The wizard lets you choose, without typing model IDs:
+The first menu lists `genius`, `smart`, `handy`, and `cheap` with each tier's current model and thinking level. Select only the category you want to change. Its model picker:
 
-1. Global or project configuration scope
-2. A Pi model for each tier
-3. `default` or a thinking level supported by that model
-4. `debug: false` or `debug: true`
+- Shows at most 10 rows and scrolls through longer lists
+- Filters by model ID, provider, or model name as you type
+- Marks the category's current model
+
+After selecting a model, choose its thinking level and whether to save globally or for the current trusted project. Debug and enabled state are also editable from the first menu.
 
 Direct command forms:
 
 ```text
-/jev-router configure
+/jev-router genius
+/jev-router smart
+/jev-router handy
+/jev-router cheap
 /jev-router show
 /jev-router debug
 /jev-router on
