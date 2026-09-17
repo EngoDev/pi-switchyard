@@ -15,7 +15,7 @@ import {
 export const DEFAULT_CONFIG: RouterConfig = {
   version: 1,
   enabled: true,
-  debug: false,
+  debug: "off",
   tiers: {},
   routerContextMessages: 5,
   initialOriginMessages: 5,
@@ -174,7 +174,11 @@ function normalizePartial(value: unknown): ConfigFragment {
 
   const result: ConfigFragment = { tiers };
   if (typeof input.enabled === "boolean") result.enabled = input.enabled;
-  if (typeof input.debug === "boolean") result.debug = input.debug;
+  if (input.debug === "off" || input.debug === "minimal" || input.debug === "verbose") {
+    result.debug = input.debug;
+  } else if (typeof input.debug === "boolean") {
+    result.debug = input.debug ? "minimal" : "off";
+  }
   if (typeof input.routerContextMessages === "number") {
     result.routerContextMessages = Math.max(1, Math.min(20, Math.trunc(input.routerContextMessages)));
   }

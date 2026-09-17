@@ -16,7 +16,7 @@ import type { RouterConfig } from "../src/types.js";
 
 const configured: RouterConfig = {
   ...DEFAULT_CONFIG,
-  debug: true,
+  debug: "minimal",
   tiers: {
     genius: { provider: "openai", modelId: "genius", thinking: "xhigh" },
     smart: { provider: "openai", modelId: "smart", thinking: "high" },
@@ -31,7 +31,7 @@ test("project configuration round-trips including debug and model tiers", () => 
     const path = writeConfig(cwd, "project", configured);
     assert.equal(path, getConfigPath(cwd, "project"));
     const loaded = loadConfig(cwd, true);
-    assert.equal(loaded.debug, true);
+    assert.equal(loaded.debug, "minimal");
     assert.deepEqual(loaded.tiers, configured.tiers);
     assert.equal(isConfigured(loaded), true);
   } finally {
@@ -43,10 +43,26 @@ test("legacy Jev Router project configuration remains readable", () => {
   const cwd = mkdtempSync(join(tmpdir(), "switchyard-legacy-config-"));
   try {
     mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(getLegacyConfigPath(cwd, "project"), JSON.stringify(configured));
+    writeFileSync(getLegacyConfigPath(cwd, "project"), JSON.stringify({
+      ...configured,
+      debug: true,
+    }));
     const loaded = loadConfig(cwd, true);
-    assert.equal(loaded.debug, true);
+    assert.equal(loaded.debug, "minimal");
     assert.deepEqual(loaded.tiers, configured.tiers);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("legacy debug booleans migrate to minimal and off", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-debug-migration-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(getConfigPath(cwd, "project"), JSON.stringify({ debug: false }));
+    assert.equal(loadConfig(cwd, true).debug, "off");
+    writeFileSync(getConfigPath(cwd, "project"), JSON.stringify({ debug: true }));
+    assert.equal(loadConfig(cwd, true).debug, "minimal");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

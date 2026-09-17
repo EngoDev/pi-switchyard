@@ -51,7 +51,8 @@ import {
 } from "./origin-context.js";
 import {
   evaluateModelSwitch,
-  formatSwitchDecision,
+  formatMinimalSwitchDecision,
+  formatVerboseSwitchDecision,
   type ModelSwitchDecision,
   type RoutedModel,
 } from "./switching.js";
@@ -155,7 +156,7 @@ function findLastRoute(entries: readonly SessionEntry[]): ActiveRoute | undefine
 
 export function formatRouteStatus(route: ActiveRoute, effectiveThinking: ThinkingLevel): string {
   const thread = route.threadId === "origin" ? "origin" : `temp:${route.threadName}`;
-  return `jev ${thread} · ${route.tier} · ${route.provider}/${route.modelId} · ${effectiveThinking}`;
+  return `switchyard ${thread} · ${route.tier} · ${route.provider}/${route.modelId} · ${effectiveThinking}`;
 }
 
 function modelSupportsImages(model: Model<any>): boolean {
@@ -273,11 +274,17 @@ function evaluateThreadModelSwitch(
     0,
   );
   const observedCacheRead = recentUsage.reduce((sum, usage) => sum + usage.cacheRead, 0);
-  const warmCacheRatio = threadCacheInvalidatedBySummary(ctx, threadId, incumbent)
+  const cacheInvalidated = threadCacheInvalidatedBySummary(ctx, threadId, incumbent);
+  const warmCacheRatio = cacheInvalidated
     ? 0
     : cacheInput > 0
       ? observedCacheRead / cacheInput
       : undefined;
+  const warmCacheSource = cacheInvalidated
+    ? "invalidated" as const
+    : cacheInput > 0
+      ? "observed" as const
+      : "no-history" as const;
   const observedCacheWrite = recentUsage.reduce((sum, usage) => sum + usage.cacheWrite, 0);
   const observedUncachedInput = recentUsage.reduce((sum, usage) => sum + usage.input + usage.cacheWrite, 0);
   const cacheWriteRatio = observedUncachedInput > 0
@@ -298,6 +305,7 @@ function evaluateThreadModelSwitch(
     contextTokens,
     promptTokens,
     warmCacheRatio,
+    warmCacheSource,
     ...(cacheWriteRatio !== undefined ? { cacheWriteRatio } : {}),
     expectedOutputTokens,
     config: config.switching,
@@ -440,7 +448,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   }
 
   function showDebugStatus(ctx: ExtensionContext, route: ActiveRoute): void {
-    if (!config.debug) {
+    if (config.debug === "off") {
       clearDebugStatus(ctx);
       return;
     }
@@ -722,7 +730,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       config = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     },
     onDebugChanged: (ctx) => {
-      if (config.enabled && config.debug && routeClient && lastVisibleRoute) {
+      if (config.enabled && config.debug !== "off" && routeClient && lastVisibleRoute) {
         showDebugStatus(ctx, lastVisibleRoute);
       } else {
         clearDebugStatus(ctx);
@@ -773,7 +781,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
           logLevel: "off",
         }),
       );
-      if (lastVisibleRoute && config.debug) showDebugStatus(ctx, lastVisibleRoute);
+      if (lastVisibleRoute && config.debug !== "off") showDebugStatus(ctx, lastVisibleRoute);
       else clearDebugStatus(ctx);
     } catch {
       routeClient = undefined;
@@ -807,7 +815,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       }
       return { cancel: true };
     }
-    if (config.debug) {
+    if (config.debug === "verbose") {
       ctx.ui.notify(
         `Origin-only tree summary excluded ${outcome.summary.details.switchyard.excludedTempMessages} temp message(s)`,
         "info",
@@ -820,7 +828,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     setOriginContextToolEnabled(false);
     restoreBranchState(ctx);
     ensureTempTreeLabels(ctx);
-    if (config.debug && routeClient && lastVisibleRoute) showDebugStatus(ctx, lastVisibleRoute);
+    if (config.debug !== "off" && routeClient && lastVisibleRoute) showDebugStatus(ctx, lastVisibleRoute);
     else clearDebugStatus(ctx);
   });
 
@@ -897,7 +905,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       readFiles: outcome.compaction.details.readFiles,
       modifiedFiles: outcome.compaction.details.modifiedFiles,
     };
-    if (config.debug) {
+    if (config.debug === "verbose") {
       ctx.ui.notify(
         `Origin-only compaction excluded ${outcome.compaction.details.switchyard.excludedTempMessages} temp message(s)`,
         "info",
@@ -1244,13 +1252,16 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     pendingRoutePrompt = event.prompt;
     setOriginContextToolEnabled(activeRoute.threadId !== "origin");
     showDebugStatus(ctx, activeRoute);
-    if (config.debug) {
-      const thread = activeRoute.threadId === "origin" ? "origin" : `temp:${activeRoute.threadName}`;
-      ctx.ui.notify(
-        `Switchyard route → ${thread} | ${activeRoute.tier} | ${activeRoute.provider}/${activeRoute.modelId} | thinking:${pi.getThinkingLevel()} | confidence target:${activeRoute.decision.targetConfidence.toFixed(2)} tier:${activeRoute.decision.tierConfidence.toFixed(2)}`,
-        "info",
-      );
-      ctx.ui.notify(formatSwitchDecision(switchDecision, candidate), "info");
+    const thread = activeRoute.threadId === "origin" ? "origin" : `temp:${activeRoute.threadName}`;
+    if (config.debug === "minimal") {
+      ctx.ui.notify(formatMinimalSwitchDecision(switchDecision, candidate, thread), "info");
+    } else if (config.debug === "verbose") {
+      ctx.ui.notify(formatVerboseSwitchDecision(switchDecision, candidate, {
+        thread,
+        targetConfidence: activeRoute.decision.targetConfidence,
+        tierConfidence: activeRoute.decision.tierConfidence,
+        config: config.switching,
+      }), "info");
     }
   });
 

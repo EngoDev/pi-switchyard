@@ -3,6 +3,7 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 export const TIER_NAMES = ["genius", "smart", "handy", "cheap"] as const;
 export type TierName = (typeof TIER_NAMES)[number];
 export type ThinkingSelection = ThinkingLevel | "default";
+export type DebugMode = "off" | "minimal" | "verbose";
 
 export interface TierConfig {
   provider: string;
@@ -40,7 +41,7 @@ export interface SwitchingConfig {
 export interface RouterConfig {
   version: 1;
   enabled: boolean;
-  debug: boolean;
+  debug: DebugMode;
   tiers: Partial<Record<TierName, TierConfig>>;
   routerContextMessages: number;
   initialOriginMessages: number;

@@ -102,7 +102,7 @@ Overrides take precedence over Pi metadata. Switchyard does not maintain a stati
 
 ### What users see and what stays isolated
 
-The normal Pi transcript, working indicator, reasoning display, and tool calls remain native Pi UI. In regular mode the routing itself is intentionally quiet. In `debug: true`, Switchyard exposes the selected thread, tier, model, thinking level, and routing confidence in the footer/notification.
+The normal Pi transcript, working indicator, reasoning display, and tool calls remain native Pi UI. With `debug: "off"` routing is intentionally quiet. `minimal` exposes one compact combined decision per request, while `verbose` shows the complete thread/model/cache economics audit.
 
 Temp turns are marked as `temp:<thread-name>` in `/tree`. The messages are stored in the same physical Pi JSONL session so Pi can display and recover them, but Switchyard filters them from origin provider requests. Conversely, a temp model sees its own thread, its initial origin snapshot, and any context it explicitly retrieved from origin—not the entire origin transcript.
 
@@ -184,14 +184,30 @@ Legacy `jev-router.json` files are still read for migration compatibility; new c
 
 ### Debug mode
 
-When `debug` is true, the footer shows the active logical thread, tier, model, and effective thinking level. Every successful decision also emits a notification with target and tier confidence, for example:
+`debug` is an enum:
+
+- `"off"` — no routing/economics notifications.
+- `"minimal"` — persistent footer plus one compact combined decision per request.
+- `"verbose"` — persistent footer plus one multiline audit containing current/requested/selected models, confidence, token estimates, cache source, stay/switch costs, savings, and thresholds.
+
+Minimal example:
 
 ```text
-Switchyard route → temp:did-create-pr | cheap | openai/gpt-5.6-luna | thinking:high | confidence target:0.97 tier:0.99
-Switchyard model policy: requested cheap/provider/luna; selected smart/provider/sol (insufficient-savings) · warm stay $0.0120 · cold switch $0.0310
+Switchyard · origin · smart/sol → cheap/luna · switched · save $0.8121 (77.8%)
 ```
 
-When `debug` is false, routing remains visually transparent except for normal Pi model/footer changes and `/tree` labels.
+Verbose output starts with:
+
+```text
+Switchyard economics · origin
+
+current:   smart / example-provider/model-smart
+requested: cheap / example-provider/model-cheap
+selected:  cheap / example-provider/model-cheap
+reason:    material-savings
+```
+
+Legacy booleans migrate automatically: `false → "off"`, `true → "minimal"`. Temp entries remain labeled in `/tree` regardless of debug mode.
 
 ## Jev decisions
 

@@ -9,6 +9,7 @@ import { writeConfigPatch, type ConfigScope } from "./config.js";
 import { showPicker } from "./picker.js";
 import {
   TIER_NAMES,
+  type DebugMode,
   type RouterConfig,
   type ThinkingSelection,
   type TierName,
@@ -207,16 +208,17 @@ async function editTier(
 }
 
 async function editDebug(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
-  const selected = await showPicker(ctx, "Debug routing indication", [
-    { value: "false", label: "false", description: "Hide route decisions" },
-    { value: "true", label: "true", description: "Show thread, model, thinking, and confidence" },
-  ], { maxVisible: 4, preselect: String(hooks.getConfig().debug) });
+  const selected = await showPicker(ctx, "Switchyard debug mode", [
+    { value: "off", label: "off", description: "Hide routing and economics diagnostics" },
+    { value: "minimal", label: "minimal", description: "One compact decision notification per request" },
+    { value: "verbose", label: "verbose", description: "Full routing and economics audit block" },
+  ], { maxVisible: 5, preselect: hooks.getConfig().debug });
   if (!selected) return;
-  const scope = await chooseScope(ctx, "Save debug setting");
+  const scope = await chooseScope(ctx, "Save debug mode");
   if (!scope) return;
-  const path = writeConfigPatch(ctx.cwd, scope, { debug: selected === "true" });
+  const path = writeConfigPatch(ctx.cwd, scope, { debug: selected as DebugMode });
   finishConfigChange(ctx, hooks);
-  ctx.ui.notify(`Switchyard debug ${hooks.getConfig().debug ? "enabled" : "disabled"} · ${path}`, "info");
+  ctx.ui.notify(`Switchyard debug → ${hooks.getConfig().debug} · ${path}`, "info");
 }
 
 async function editTempLimits(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {

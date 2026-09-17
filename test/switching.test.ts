@@ -4,7 +4,12 @@ import test from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
 
 import { DEFAULT_CONFIG } from "../src/config.js";
-import { evaluateModelSwitch, type RoutedModel } from "../src/switching.js";
+import {
+  evaluateModelSwitch,
+  formatMinimalSwitchDecision,
+  formatVerboseSwitchDecision,
+  type RoutedModel,
+} from "../src/switching.js";
 
 function model(id: string, cost: Model<any>["cost"]): Model<any> {
   return {
@@ -195,6 +200,55 @@ test("cache-write rates apply only to the estimated cache-write bucket", () => {
     config: { ...switching, assumedCacheWriteRatio: 0 },
   });
   assert.equal(result.economics?.coldSwitchCostUsd, 0.001);
+});
+
+test("minimal diagnostics combine incumbent, request, selection, and savings in one line", () => {
+  const incumbent = routed("smart", expensive);
+  const candidate = routed("cheap", cheap);
+  const decision = evaluateModelSwitch({
+    incumbent,
+    candidate,
+    tierConfidence: 0.95,
+    contextTokens: 1_000,
+    promptTokens: 100,
+    warmCacheRatio: 0.2,
+    warmCacheSource: "observed",
+    expectedOutputTokens: 10_000,
+    config: switching,
+  });
+  const text = formatMinimalSwitchDecision(decision, candidate, "origin");
+  assert.match(text, /^Switchyard · origin/);
+  assert.match(text, /smart\/expensive → cheap\/cheap/);
+  assert.match(text, /switched · save/);
+  assert.equal(text.includes("\n"), false);
+});
+
+test("verbose diagnostics expose current, requested, selected, cache source, and thresholds", () => {
+  const incumbent = routed("smart", expensive);
+  const candidate = routed("cheap", cheap);
+  const decision = evaluateModelSwitch({
+    incumbent,
+    candidate,
+    tierConfidence: 0.95,
+    contextTokens: 100_000,
+    promptTokens: 100,
+    warmCacheRatio: 0.95,
+    warmCacheSource: "observed",
+    expectedOutputTokens: 100,
+    config: switching,
+  });
+  const text = formatVerboseSwitchDecision(decision, candidate, {
+    thread: "temp:pr-check",
+    targetConfidence: 0.9,
+    tierConfidence: 0.95,
+    config: switching,
+  });
+  assert.match(text, /Switchyard economics · temp:pr-check/);
+  assert.match(text, /current:\s+smart \/ test\/expensive/);
+  assert.match(text, /requested:\s+cheap \/ test\/cheap/);
+  assert.match(text, /selected:\s+smart \/ test\/expensive/);
+  assert.match(text, /warm prefix:\s+95% observed/);
+  assert.match(text, /threshold:\s+\$0\.001 \/ 20%/);
 });
 
 test("Switchyard economics overrides and long-context tiers take precedence", () => {

@@ -21,6 +21,7 @@ export interface ModelSwitchInput {
   contextTokens: number;
   promptTokens: number;
   warmCacheRatio: number | undefined;
+  warmCacheSource?: "observed" | "assumed" | "invalidated" | "no-history";
   cacheWriteRatio?: number;
   expectedOutputTokens: number;
   config: SwitchingConfig;
@@ -41,6 +42,7 @@ export interface SwitchEconomics {
   contextTokens: number;
   promptTokens: number;
   warmCacheRatio: number;
+  warmCacheSource: "observed" | "assumed" | "invalidated" | "no-history";
   cacheWriteRatio: number;
   expectedOutputTokens: number;
   incumbentRates: ModelCostRates;
@@ -54,6 +56,7 @@ export interface SwitchEconomics {
 export interface ModelSwitchDecision {
   selection: "candidate" | "incumbent";
   selected: RoutedModel;
+  incumbent?: RoutedModel;
   reason: ModelSwitchReason;
   economics?: SwitchEconomics;
 }
@@ -101,30 +104,38 @@ function usd(tokens: number, perMillionTokens: number): number {
 export function evaluateModelSwitch(input: ModelSwitchInput): ModelSwitchDecision {
   const { incumbent, candidate, config } = input;
   if (!config.cacheAware) {
-    return { selection: "candidate", selected: candidate, reason: "cache-awareness-disabled" };
+    return {
+      selection: "candidate",
+      selected: candidate,
+      ...(incumbent ? { incumbent } : {}),
+      reason: "cache-awareness-disabled",
+    };
   }
   if (!incumbent) return { selection: "candidate", selected: candidate, reason: "new-thread" };
 
   const incumbentCapability = CAPABILITY_ORDER.indexOf(incumbent.tier);
   const candidateCapability = CAPABILITY_ORDER.indexOf(candidate.tier);
   if (candidateCapability > incumbentCapability && config.upgradesAlwaysSwitch) {
-    return { selection: "candidate", selected: candidate, reason: "capability-upgrade" };
+    return { selection: "candidate", selected: candidate, incumbent, reason: "capability-upgrade" };
   }
   if (candidateCapability < incumbentCapability && input.tierConfidence < config.downgradeConfidenceFloor) {
     return {
       selection: "incumbent",
       selected: incumbent,
+      incumbent,
       reason: "low-downgrade-confidence",
     };
   }
   if (sameModel(incumbent.model, candidate.model)) {
-    return { selection: "candidate", selected: candidate, reason: "same-model" };
+    return { selection: "candidate", selected: candidate, incumbent, reason: "same-model" };
   }
 
   const contextTokens = Math.max(input.promptTokens, input.contextTokens);
   const promptTokens = Math.max(0, Math.min(contextTokens, input.promptTokens));
   const prefixTokens = Math.max(0, contextTokens - promptTokens);
   const warmCacheRatio = Math.max(0, Math.min(1, input.warmCacheRatio ?? config.assumedWarmCacheRatio));
+  const warmCacheSource = input.warmCacheSource
+    ?? (input.warmCacheRatio === undefined ? "assumed" : "observed");
   const cacheWriteRatio = Math.max(0, Math.min(1, input.cacheWriteRatio ?? config.assumedCacheWriteRatio));
   const warmTokens = prefixTokens * warmCacheRatio;
   const incumbentColdTokens = contextTokens - warmTokens;
@@ -137,6 +148,7 @@ export function evaluateModelSwitch(input: ModelSwitchInput): ModelSwitchDecisio
     return {
       selection: useCandidate ? "candidate" : "incumbent",
       selected: useCandidate ? candidate : incumbent,
+      incumbent,
       reason: useCandidate ? "unknown-economics-switch" : "unknown-economics-stay",
     };
   }
@@ -156,6 +168,7 @@ export function evaluateModelSwitch(input: ModelSwitchInput): ModelSwitchDecisio
     contextTokens,
     promptTokens,
     warmCacheRatio,
+    warmCacheSource,
     cacheWriteRatio,
     expectedOutputTokens,
     incumbentRates,
@@ -171,27 +184,106 @@ export function evaluateModelSwitch(input: ModelSwitchInput): ModelSwitchDecisio
     ? {
         selection: "candidate",
         selected: candidate,
+        incumbent,
         reason: "material-savings",
         economics,
       }
     : {
         selection: "incumbent",
         selected: incumbent,
+        incumbent,
         reason: "insufficient-savings",
         economics,
       };
 }
 
-export function formatSwitchDecision(decision: ModelSwitchDecision, requested: RoutedModel): string {
-  const requestedName = `${requested.tier}/${requested.model.provider}/${requested.model.id}`;
-  const selectedName = `${decision.selected.tier}/${decision.selected.model.provider}/${decision.selected.model.id}`;
-  if (!decision.economics) {
-    return `Switchyard model policy: requested ${requestedName}; selected ${selectedName} (${decision.reason})`;
+function shortModel(value: RoutedModel): string {
+  return `${value.tier}/${value.model.id}`;
+}
+
+function fullModel(value: RoutedModel | undefined): string {
+  return value
+    ? `${value.tier} / ${value.model.provider}/${value.model.id}`
+    : "none (new logical thread)";
+}
+
+export interface SwitchDiagnosticContext {
+  thread: string;
+  targetConfidence: number;
+  tierConfidence: number;
+  config: SwitchingConfig;
+}
+
+export function formatMinimalSwitchDecision(
+  decision: ModelSwitchDecision,
+  requested: RoutedModel,
+  thread: string,
+): string {
+  const prefix = `Switchyard · ${thread}`;
+  const current = decision.incumbent ? shortModel(decision.incumbent) : undefined;
+  const selected = shortModel(decision.selected);
+  if (!current) return `${prefix} · selected ${selected} · new thread`;
+  if (decision.reason === "same-model") {
+    return `${prefix} · ${requested.model.id} ${decision.incumbent!.tierConfig.thinking} → ${decision.selected.tierConfig.thinking} · same model`;
   }
-  const economics = decision.economics;
-  return [
-    `Switchyard model policy: requested ${requestedName}; selected ${selectedName} (${decision.reason})`,
-    `warm stay $${economics.warmStayCostUsd.toFixed(4)} · cold switch $${economics.coldSwitchCostUsd.toFixed(4)}`,
-    `savings $${economics.savingsUsd.toFixed(4)} (${(economics.savingsRatio * 100).toFixed(1)}%) · warm prefix ${(economics.warmCacheRatio * 100).toFixed(0)}%`,
-  ].join(" · ");
+  if (decision.selection === "candidate") {
+    if (decision.reason === "capability-upgrade") {
+      return `${prefix} · ${current} → ${selected} · capability upgrade`;
+    }
+    if (decision.economics) {
+      return `${prefix} · ${current} → ${selected} · switched · save $${decision.economics.savingsUsd.toFixed(4)} (${(decision.economics.savingsRatio * 100).toFixed(1)}%)`;
+    }
+    return `${prefix} · ${current} → ${selected} · ${decision.reason}`;
+  }
+
+  const wanted = shortModel(requested);
+  if (decision.reason === "unknown-economics-stay") {
+    return `${prefix} · kept ${current} · ${wanted} pricing unknown`;
+  }
+  if (decision.economics) {
+    if (decision.economics.savingsUsd < 0) {
+      return `${prefix} · kept ${current} · wanted ${wanted} · cold switch costs $${Math.abs(decision.economics.savingsUsd).toFixed(4)} more`;
+    }
+    return `${prefix} · kept ${current} · wanted ${wanted} · $${decision.economics.savingsUsd.toFixed(4)} savings below threshold`;
+  }
+  return `${prefix} · kept ${current} · wanted ${wanted} · ${decision.reason}`;
+}
+
+export function formatVerboseSwitchDecision(
+  decision: ModelSwitchDecision,
+  requested: RoutedModel,
+  context: SwitchDiagnosticContext,
+): string {
+  const lines = [
+    `Switchyard economics · ${context.thread}`,
+    "",
+    `current:   ${fullModel(decision.incumbent)}`,
+    `requested: ${fullModel(requested)}`,
+    `selected:  ${fullModel(decision.selected)}`,
+    `reason:    ${decision.reason}`,
+    `confidence: target ${(context.targetConfidence * 100).toFixed(1)}% · tier ${(context.tierConfidence * 100).toFixed(1)}%`,
+  ];
+  if (decision.economics) {
+    const economics = decision.economics;
+    lines.push(
+      "",
+      `context:       ${Math.round(economics.contextTokens).toLocaleString()} tokens`,
+      `prompt:        ${Math.round(economics.promptTokens).toLocaleString()} tokens`,
+      `expected out:  ${Math.round(economics.expectedOutputTokens).toLocaleString()} tokens`,
+      `warm prefix:   ${(economics.warmCacheRatio * 100).toFixed(0)}% ${economics.warmCacheSource}`,
+      `cache writes:  ${(economics.cacheWriteRatio * 100).toFixed(0)}% of uncached prefix`,
+      "",
+      `warm stay:     $${economics.warmStayCostUsd.toFixed(4)}`,
+      `cold switch:   $${economics.coldSwitchCostUsd.toFixed(4)}`,
+      `savings:       $${economics.savingsUsd.toFixed(4)} (${(economics.savingsRatio * 100).toFixed(1)}%)`,
+      `threshold:     $${context.config.minSavingsUsd} / ${(context.config.minSavingsRatio * 100).toFixed(0)}%`,
+    );
+  } else if (decision.reason === "capability-upgrade") {
+    lines.push("", "cache economics bypassed for capability upgrade");
+  } else if (decision.reason === "same-model") {
+    lines.push("", `thinking: ${decision.incumbent?.tierConfig.thinking ?? "unknown"} → ${decision.selected.tierConfig.thinking}`, "no model-cache switch required");
+  } else if (decision.reason.startsWith("unknown-economics")) {
+    lines.push("", "pricing metadata is unavailable for one or both models");
+  }
+  return lines.join("\n");
 }
