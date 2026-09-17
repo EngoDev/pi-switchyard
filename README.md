@@ -2,6 +2,63 @@
 
 A [Pi](https://github.com/earendil-works/pi-mono) extension that uses TypeSafe AI's Jev model to select a logical conversation thread and a configured model tier before each idle user request.
 
+## Philosophy and intended use
+
+Switchyard makes one long-lived Pi conversation behave more like a practical workbench than a single ever-growing prompt. It preserves the **origin** thread for the work that matters, while placing bounded side work into reusable **temp** threads and selecting the least expensive configured capability tier that should complete each task reliably.
+
+The goal is not to make every prompt invisible, nor to replace deliberate user control of Pi. The goal is to avoid paying a high-capability model—and carrying a large implementation context—for questions that do not need either.
+
+### Mental model
+
+- **Origin** is the primary task. Its context should hold the decisions, artifacts, code work, and unresolved questions needed to continue that task.
+- **Temp threads** are focused side conversations. They are for bounded questions or operations whose detailed transcript should not distract the origin task, but whose follow-ups should still remember their own work.
+- **Tiers** describe required capability, not a provider or model family. You map `genius`, `smart`, `handy`, and `cheap` to the models and thinking levels available to you.
+- **Jev recommends; code decides.** Jev chooses a target thread and tier from closed options. Switchyard applies confidence policy, checks model availability/image support, performs the model switch, filters context, and executes no side effect merely because Jev returned an answer.
+
+### When Switchyard helps
+
+Use it for sessions that mix substantial primary work with small interruptions, especially when the origin model is expensive or the origin context is large:
+
+```text
+Origin:  implement and review a multi-file authentication system
+Temp:    did we create a PR?
+Temp:    what branch are we on?
+Temp:    check the deployment status
+Temp:    create that PR
+Origin:  continue the token-replay analysis
+```
+
+The PR status request can use `cheap` in a temp thread. “Create that PR” can reuse the same thread, often with `handy`. The authentication analysis stays in origin and can retain `smart` or `genius` capability without accumulating the PR conversation.
+
+It is less useful for a short, single-purpose conversation where every message directly advances one task. Switchyard can still route those requests, but it cannot create meaningful savings when there is no unrelated context to isolate.
+
+### Thread selection expectations
+
+Switchyard normally keeps a request in **origin** when it advances the primary task, depends on origin decisions, changes shared implementation work, or should inform future origin work.
+
+It normally creates or reuses a **temp** thread when the request is an administrative/status check, a bounded research or verification aside, an unrelated question, or a follow-up to an existing temp task. New temp threads receive a small origin snapshot. They can call `get_context_from_origin` if they need a precise additional slice.
+
+Thread routing is probabilistic. Low-confidence target choices deliberately stay in origin rather than silently isolating work that might matter to the primary task.
+
+### Tier selection expectations
+
+`cheap`, `handy`, `smart`, and `genius` are user-configured capability labels:
+
+| Tier | Intended work |
+| --- | --- |
+| `cheap` | Status checks, factual lookups, confirmations, and simple commands. |
+| `handy` | Routine coding, repository operations, and bounded multi-step tasks. |
+| `smart` | Substantial implementation, analysis, review, and coordinated work. |
+| `genius` | Novel architecture, difficult debugging, broad ambiguity, or high-cost mistakes. |
+
+Choose the mapping that fits your account, providers, latency tolerance, and risk. For example, one user might map every tier to a different model at default thinking; another may use the same model with `xhigh`, `high`, and lower thinking configurations. When Jev has low confidence in a tier, Switchyard escalates one tier rather than taking an underpowered gamble.
+
+### What users see and what stays isolated
+
+The normal Pi transcript, working indicator, reasoning display, and tool calls remain native Pi UI. In regular mode the routing itself is intentionally quiet. In `debug: true`, Switchyard exposes the selected thread, tier, model, thinking level, and routing confidence in the footer/notification.
+
+Temp turns are marked as `temp:<thread-name>` in `/tree`. The messages are stored in the same physical Pi JSONL session so Pi can display and recover them, but Switchyard filters them from origin provider requests. Conversely, a temp model sees its own thread, its initial origin snapshot, and any context it explicitly retrieved from origin—not the entire origin transcript.
+
 ## Behavior
 
 - Routes among `genius`, `smart`, `handy`, and `cheap` tiers.
