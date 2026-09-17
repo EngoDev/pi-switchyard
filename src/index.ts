@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 
 import { resolveTypeSafeApiKey } from "./auth.js";
 import { isConfigured, loadConfig } from "./config.js";
+import { registerConfigurationCommand } from "./configuration-ui.js";
 import { decideRoute, type RouteClient } from "./router.js";
 import {
   createTempThread,
@@ -99,6 +100,20 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     }
     ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", routeStatus(route, pi.getThinkingLevel())));
   }
+
+  registerConfigurationCommand(pi, {
+    getConfig: () => config,
+    setConfig: (next) => {
+      config = next;
+    },
+    onDebugChanged: (ctx) => {
+      if (config.enabled && config.debug && routeClient && lastVisibleRoute) {
+        showDebugStatus(ctx, lastVisibleRoute);
+      } else {
+        clearDebugStatus(ctx);
+      }
+    },
+  });
 
   pi.on("session_start", (_event, ctx) => {
     config = loadConfig(ctx.cwd);
