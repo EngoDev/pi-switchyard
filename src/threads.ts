@@ -188,7 +188,10 @@ export function findMissingTempLabels(
 ): Array<{ entryId: string; label: string }> {
   const missing: Array<{ entryId: string; label: string }> = [];
   for (const entry of entries) {
-    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    if (
+      entry.type !== "message"
+      || (entry.message.role !== "user" && entry.message.role !== "assistant")
+    ) continue;
     const metadata = (entry.message as TaggedAgentMessage).jevRouter;
     if (!metadata || getLabel(entry.id)) continue;
     missing.push({ entryId: entry.id, label: `temp:${metadata.threadName}` });

@@ -399,7 +399,8 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     pendingRoutePrompt = undefined;
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event, ctx) => {
+    ensureTempTreeLabels(ctx);
     setOriginContextToolEnabled(false);
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;

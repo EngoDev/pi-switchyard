@@ -9,7 +9,7 @@ A [Pi](https://github.com/earendil-works/pi-mono) extension that uses TypeSafe A
 - Reuses relevant temp threads when a request follows an earlier aside.
 - Gives each new temp thread the last five origin user/assistant messages by default.
 - Makes `get_context_from_origin` available only during temp-thread turns for bounded, filtered retrieval.
-- Labels temp user turns as `temp:<thread-name>` in `/tree`.
+- Labels both temp user prompts and assistant answers as `temp:<thread-name>` in `/tree`.
 - Sends only bounded excerpts to Jev after best-effort credential redaction.
 - Performs no automatic routing, model switching, or context filtering when the TypeSafe key is absent or a Jev request fails or times out.
 

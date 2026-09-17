@@ -39,8 +39,13 @@ const assistant = (text: string, timestamp: number, threadId?: string): TaggedAg
   ...(threadId ? { jevRouter: { threadId, threadName: "temp" } } : {}),
 });
 
-test("origin context excludes tagged temp messages", () => {
-  const messages: AgentMessage[] = [user("main", 1), assistant("main answer", 2), user("aside", 3, "t1")];
+test("origin context excludes tagged temp prompts and assistant answers", () => {
+  const messages: AgentMessage[] = [
+    user("main", 1),
+    assistant("main answer", 2),
+    user("aside", 3, "t1"),
+    assistant("temp answer", 4, "t1"),
+  ];
   assert.deepEqual(getOriginContext(messages, 5).map((item) => item.text), ["main", "main answer"]);
   assert.deepEqual(filterMessagesForOrigin(messages).map((message) => message.timestamp), [1, 2]);
 });
@@ -61,18 +66,26 @@ test("temp context contains a seed snapshot and only its own messages", () => {
   assert.deepEqual(filtered.slice(1).map((message) => message.timestamp), [2, 3]);
 });
 
-test("finds temp user entries that need visible tree labels", () => {
-  const entry = {
+test("finds temp prompts and answers that need visible tree labels", () => {
+  const userEntry = {
     type: "message" as const,
     id: "temp-user",
     parentId: null,
     timestamp: new Date(1).toISOString(),
     message: user("aside", 1, "t1"),
   };
-  assert.deepEqual(findMissingTempLabels([entry], () => undefined), [
+  const answerEntry = {
+    type: "message" as const,
+    id: "temp-answer",
+    parentId: "temp-user",
+    timestamp: new Date(2).toISOString(),
+    message: assistant("temp answer", 2, "t1"),
+  };
+  assert.deepEqual(findMissingTempLabels([userEntry, answerEntry], () => undefined), [
     { entryId: "temp-user", label: "temp:temp" },
+    { entryId: "temp-answer", label: "temp:temp" },
   ]);
-  assert.deepEqual(findMissingTempLabels([entry], () => "already-labeled"), []);
+  assert.deepEqual(findMissingTempLabels([userEntry, answerEntry], () => "already-labeled"), []);
 });
 
 test("custom-message temp metadata is restored from persisted details", () => {
