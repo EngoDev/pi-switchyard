@@ -7,6 +7,7 @@ import {
   buildCategoryItems,
   getThinkingSelections,
   MODEL_PICKER_MAX_VISIBLE,
+  runCategoryMenuLoop,
 } from "../src/configuration-ui.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { filterPickerItems } from "../src/picker.js";
@@ -60,6 +61,23 @@ test("category menu shows every tier's current model and thinking", () => {
   assert.match(items[0]?.description ?? "", /openai\/gpt-astra.*xhigh/);
   assert.equal(items[1]?.description, "not configured");
   assert.match(items[3]?.description ?? "", /openai\/gpt-luna.*default/);
+});
+
+test("Switchyard menu returns after each category change until the root menu is cancelled", async () => {
+  const selections = ["tier:genius", "tier:smart", undefined];
+  const handled: string[] = [];
+  let menuOpens = 0;
+  await runCategoryMenuLoop(
+    async () => {
+      menuOpens += 1;
+      return selections.shift();
+    },
+    async (selection) => {
+      handled.push(selection);
+    },
+  );
+  assert.equal(menuOpens, 3);
+  assert.deepEqual(handled, ["tier:genius", "tier:smart"]);
 });
 
 test("model picker is bounded and filters across labels and descriptions", () => {

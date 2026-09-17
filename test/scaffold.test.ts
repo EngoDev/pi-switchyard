@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import jevRouterExtension, { formatRouteStatus } from "../index.js";
+import switchyardExtension, { formatRouteStatus } from "../index.js";
 
 test("exports a Pi extension factory", () => {
-  assert.equal(typeof jevRouterExtension, "function");
+  assert.equal(typeof switchyardExtension, "function");
 });
 
 test("debug status identifies thread, tier, model, and thinking", () => {

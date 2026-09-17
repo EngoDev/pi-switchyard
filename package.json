@@ -1,5 +1,5 @@
 {
-  "name": "pi-jev-router",
+  "name": "pi-switchyard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "check": "pnpm typecheck && pnpm test",
-    "check:global-load": "cd /tmp && pi -p --no-session '/jev-router show'",
+    "check:global-load": "cd /tmp && pi -p --no-session '/switchyard show'",
     "evaluate:live": "tsx scripts/evaluate-live.ts"
   },
   "dependencies": {

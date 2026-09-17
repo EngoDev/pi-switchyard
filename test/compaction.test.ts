@@ -17,7 +17,7 @@ const user = (text: string, timestamp: number, threadId?: string): TaggedAgentMe
   role: "user",
   content: [{ type: "text", text }],
   timestamp,
-  ...(threadId ? { jevRouter: { threadId, threadName: "aside" } } : {}),
+  ...(threadId ? { switchyard: { threadId, threadName: "aside" } } : {}),
 });
 
 const assistantTool = (name: "read" | "write" | "edit", path: string, timestamp: number, threadId?: string): TaggedAgentMessage => ({
@@ -36,7 +36,7 @@ const assistantTool = (name: "read" | "write" | "edit", path: string, timestamp:
   },
   stopReason: "toolUse",
   timestamp,
-  ...(threadId ? { jevRouter: { threadId, threadName: "aside" } } : {}),
+  ...(threadId ? { switchyard: { threadId, threadName: "aside" } } : {}),
 });
 
 function input(messages: AgentMessage[], turnPrefixMessages: AgentMessage[] = []): OriginCompactionInput {
@@ -66,7 +66,7 @@ test("persisted temp custom messages are excluded from origin compaction", async
     customType: "other-extension",
     content: "temp-only custom context",
     display: false,
-    details: { jevRouter: { threadId: "temp1", threadName: "aside" } },
+    details: { switchyard: { threadId: "temp1", threadName: "aside" } },
     timestamp: 2,
   };
   const result = await compactOriginThread(
@@ -102,7 +102,7 @@ test("mixed compaction summarizes only origin messages, including split-turn fil
   assert.equal(result.compaction.summary, "origin-only summary");
   assert.equal(result.compaction.firstKeptEntryId, "kept-entry");
   assert.equal(result.compaction.tokensBefore, 1234);
-  assert.equal(result.compaction.details.jevRouter.excludedTempMessages, 2);
+  assert.equal(result.compaction.details.switchyard.excludedTempMessages, 2);
 });
 
 test("mixed compaction preserves cumulative origin file tracking without temp files", async () => {
@@ -141,7 +141,7 @@ test("origin file tracking survives a safe custom to default compaction sequence
       details: {
         readFiles: ["src/a.ts"],
         modifiedFiles: [],
-        jevRouter: { threadAware: true },
+        switchyard: { threadAware: true },
       },
     },
     { type: "message" as const, id: "next", parentId: "custom", timestamp: new Date(4).toISOString(), message: user("next", 4) },
@@ -196,7 +196,7 @@ test("temp compaction includes messages across interleaved global compaction bou
       firstKeptEntryId: "b1",
       tokensBefore: 100,
       details: {
-        jevRouter: {
+        switchyard: {
           threadAware: true,
           tempThreads: {
             temp1: { threadName: "aside", summary: "old temp summary", firstKeptEntryId: "b1" },

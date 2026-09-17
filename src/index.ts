@@ -54,8 +54,9 @@ import type {
   TierName,
 } from "./types.js";
 
-const ROUTER_ENTRY_TYPE = "jev-router";
-const STATUS_KEY = "jev-router";
+const SWITCHYARD_ENTRY_TYPE = "switchyard";
+const LEGACY_ROUTER_ENTRY_TYPE = "jev-router";
+const STATUS_KEY = "switchyard";
 const ORIGIN_CONTEXT_TOOL = "get_context_from_origin";
 const CAPABILITY_ORDER: TierName[] = ["cheap", "handy", "smart", "genius"];
 
@@ -84,7 +85,10 @@ function normalizePersistedRoute(route: ActiveRoute): ActiveRoute {
 function findLastRoute(entries: readonly SessionEntry[]): ActiveRoute | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry?.type !== "custom" || entry.customType !== ROUTER_ENTRY_TYPE) continue;
+    if (
+      entry?.type !== "custom"
+      || (entry.customType !== SWITCHYARD_ENTRY_TYPE && entry.customType !== LEGACY_ROUTER_ENTRY_TYPE)
+    ) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
     if (data?.kind === "route") return normalizePersistedRoute(data.route);
   }
@@ -196,7 +200,7 @@ Capture its goal, constraints, progress, decisions, files, blockers, and next st
   return { summary, usage: response.usage };
 }
 
-export default function jevRouterExtension(pi: ExtensionAPI): void {
+export default function switchyardExtension(pi: ExtensionAPI): void {
   let config: RouterConfig;
   let routeClient: RouteClient | undefined;
   let threads = new Map<string, TempThread>();
@@ -395,7 +399,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
       }
       if (tempOutcome.action === "compact") {
         const { usage, ...tempSummary } = tempOutcome.summary;
-        outcome.compaction.details.jevRouter.tempThreads = {
+        outcome.compaction.details.switchyard.tempThreads = {
           [tempRoute.threadId]: tempSummary,
         };
         const combinedUsage = mergeUsage(outcome.compaction.usage, usage);
@@ -409,7 +413,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     };
     if (config.debug) {
       ctx.ui.notify(
-        `Origin-only compaction excluded ${outcome.compaction.details.jevRouter.excludedTempMessages} temp message(s)`,
+        `Origin-only compaction excluded ${outcome.compaction.details.switchyard.excludedTempMessages} temp message(s)`,
         "info",
       );
     }
@@ -516,7 +520,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     if (config.debug) {
       const thread = activeRoute.threadId === "origin" ? "origin" : `temp:${activeRoute.threadName}`;
       ctx.ui.notify(
-        `Jev route → ${thread} | ${activeRoute.tier} | ${activeRoute.provider}/${activeRoute.modelId} | thinking:${pi.getThinkingLevel()} | confidence target:${activeRoute.decision.targetConfidence.toFixed(2)} tier:${activeRoute.decision.tierConfidence.toFixed(2)}`,
+        `Switchyard route → ${thread} | ${activeRoute.tier} | ${activeRoute.provider}/${activeRoute.modelId} | thinking:${pi.getThinkingLevel()} | confidence target:${activeRoute.decision.targetConfidence.toFixed(2)} tier:${activeRoute.decision.tierConfidence.toFixed(2)}`,
         "info",
       );
     }
@@ -537,9 +541,9 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     const tagged: TaggedAgentMessage = {
       ...event.message,
       ...(event.message.role === "custom"
-        ? { details: { ...existingDetails, jevRouter: metadata } }
+        ? { details: { ...existingDetails, switchyard: metadata } }
         : {}),
-      jevRouter: metadata,
+      switchyard: metadata,
     };
     const thread = threads.get(activeRoute.threadId);
     if (thread) updateThreadFromMessage(thread, event.message);
@@ -564,12 +568,12 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
       pi.setLabel(leaf.id, `temp:${activeRoute.threadName}`);
     }
     if (pendingThreadCreated) {
-      pi.appendEntry(ROUTER_ENTRY_TYPE, {
+      pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
         kind: "thread-created",
         thread: pendingThreadCreated,
       } satisfies RouterSessionEntryData);
     }
-    pi.appendEntry(ROUTER_ENTRY_TYPE, {
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
       kind: "route",
       route: activeRoute,
       prompt: pendingRoutePrompt,

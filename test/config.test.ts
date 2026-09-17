@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_CONFIG, getConfigPath, isConfigured, loadConfig, writeConfig } from "../src/config.js";
+import {
+  DEFAULT_CONFIG,
+  getConfigPath,
+  getLegacyConfigPath,
+  isConfigured,
+  loadConfig,
+  writeConfig,
+} from "../src/config.js";
 import type { RouterConfig } from "../src/types.js";
 
 const configured: RouterConfig = {
@@ -19,7 +26,7 @@ const configured: RouterConfig = {
 };
 
 test("project configuration round-trips including debug and model tiers", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "jev-router-config-"));
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-config-"));
   try {
     const path = writeConfig(cwd, "project", configured);
     assert.equal(path, getConfigPath(cwd, "project"));
@@ -32,8 +39,21 @@ test("project configuration round-trips including debug and model tiers", () => 
   }
 });
 
+test("legacy Jev Router project configuration remains readable", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-legacy-config-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(getLegacyConfigPath(cwd, "project"), JSON.stringify(configured));
+    const loaded = loadConfig(cwd, true);
+    assert.equal(loaded.debug, true);
+    assert.deepEqual(loaded.tiers, configured.tiers);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("untrusted project configuration is ignored", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "jev-router-untrusted-"));
+  const cwd = mkdtempSync(join(tmpdir(), "switchyard-untrusted-"));
   try {
     const globalOnly = loadConfig(cwd, false);
     writeConfig(cwd, "project", configured);

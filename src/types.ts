@@ -64,6 +64,8 @@ export interface RouterMessageMetadata {
 }
 
 export type TaggedAgentMessage = AgentMessage & {
+  switchyard?: RouterMessageMetadata;
+  /** Legacy metadata written by pi-jev-router. */
   jevRouter?: RouterMessageMetadata;
 };
 

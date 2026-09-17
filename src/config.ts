@@ -30,6 +30,12 @@ const THINKING_SELECTIONS = new Set([
 
 export function getConfigPath(cwd: string, scope: ConfigScope): string {
   return scope === "global"
+    ? join(getAgentDir(), "switchyard.json")
+    : join(cwd, CONFIG_DIR_NAME, "switchyard.json");
+}
+
+export function getLegacyConfigPath(cwd: string, scope: ConfigScope): string {
+  return scope === "global"
     ? join(getAgentDir(), "jev-router.json")
     : join(cwd, CONFIG_DIR_NAME, "jev-router.json");
 }
@@ -89,7 +95,13 @@ function readConfigFile(path: string): Partial<RouterConfig> {
 }
 
 export function readScopeConfig(cwd: string, scope: ConfigScope): Partial<RouterConfig> {
-  return readConfigFile(getConfigPath(cwd, scope));
+  const legacy = readConfigFile(getLegacyConfigPath(cwd, scope));
+  const current = readConfigFile(getConfigPath(cwd, scope));
+  return {
+    ...legacy,
+    ...current,
+    tiers: { ...legacy.tiers, ...current.tiers },
+  };
 }
 
 export function loadConfig(cwd: string, includeProject = false): RouterConfig {

@@ -11,7 +11,7 @@ test("environment key takes precedence without exposing its value", () => {
 });
 
 test("loads TYPESAFE_API_KEY from a dotenv file", () => {
-  const dir = mkdtempSync(join(tmpdir(), "jev-router-auth-"));
+  const dir = mkdtempSync(join(tmpdir(), "switchyard-auth-"));
   const path = join(dir, ".env");
   try {
     writeFileSync(path, "OTHER=x\nTYPESAFE_API_KEY=file-secret\n");

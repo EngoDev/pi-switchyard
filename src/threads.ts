@@ -36,16 +36,21 @@ const STOP_WORDS = new Set([
   "you",
 ]);
 
-export function getRouterMetadata(message: AgentMessage): RouterMessageMetadata | undefined {
-  const topLevel = (message as TaggedAgentMessage).jevRouter;
-  if (topLevel) return topLevel;
-  if (message.role !== "custom" || !message.details || typeof message.details !== "object") return undefined;
-  const nested = (message.details as Record<string, unknown>).jevRouter;
-  if (!nested || typeof nested !== "object") return undefined;
-  const candidate = nested as Record<string, unknown>;
+function parseRouterMetadata(value: unknown): RouterMessageMetadata | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as Record<string, unknown>;
   return typeof candidate.threadId === "string" && typeof candidate.threadName === "string"
     ? { threadId: candidate.threadId, threadName: candidate.threadName }
     : undefined;
+}
+
+export function getRouterMetadata(message: AgentMessage): RouterMessageMetadata | undefined {
+  const tagged = message as TaggedAgentMessage;
+  const topLevel = parseRouterMetadata(tagged.switchyard) ?? parseRouterMetadata(tagged.jevRouter);
+  if (topLevel) return topLevel;
+  if (message.role !== "custom" || !message.details || typeof message.details !== "object") return undefined;
+  const details = message.details as Record<string, unknown>;
+  return parseRouterMetadata(details.switchyard) ?? parseRouterMetadata(details.jevRouter);
 }
 
 export function getMessageText(message: AgentMessage): string {
@@ -88,12 +93,7 @@ export function messagesFromEntries(entries: readonly SessionEntry[]): AgentMess
       const details = entry.details && typeof entry.details === "object"
         ? entry.details as Record<string, unknown>
         : undefined;
-      const routerMetadata = details?.jevRouter;
-      const jevRouter = routerMetadata && typeof routerMetadata === "object"
-        && typeof (routerMetadata as Record<string, unknown>).threadId === "string"
-        && typeof (routerMetadata as Record<string, unknown>).threadName === "string"
-        ? routerMetadata as { threadId: string; threadName: string }
-        : undefined;
+      const switchyard = parseRouterMetadata(details?.switchyard) ?? parseRouterMetadata(details?.jevRouter);
       messages.push({
         role: "custom",
         customType: entry.customType,
@@ -101,7 +101,7 @@ export function messagesFromEntries(entries: readonly SessionEntry[]): AgentMess
         display: entry.display,
         details: entry.details,
         timestamp: new Date(entry.timestamp).getTime(),
-        ...(jevRouter ? { jevRouter } : {}),
+        ...(switchyard ? { switchyard } : {}),
       } as TaggedAgentMessage);
     }
   }
@@ -153,7 +153,7 @@ export function updateThreadFromMessage(thread: TempThread, message: AgentMessag
 export function restoreThreads(entries: readonly SessionEntry[]): Map<string, TempThread> {
   const threads = new Map<string, TempThread>();
   for (const entry of entries) {
-    if (entry.type !== "custom" || entry.customType !== "jev-router") continue;
+    if (entry.type !== "custom" || (entry.customType !== "switchyard" && entry.customType !== "jev-router")) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
     if (data?.kind === "thread-created") threads.set(data.thread.id, { ...data.thread });
   }
@@ -206,7 +206,8 @@ export function threadContextFromEntries(
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type !== "compaction" || !entry.details || typeof entry.details !== "object") continue;
-    const router = (entry.details as Record<string, unknown>).jevRouter;
+    const details = entry.details as Record<string, unknown>;
+    const router = details.switchyard ?? details.jevRouter;
     if (!router || typeof router !== "object") continue;
     const tempThreads = (router as Record<string, unknown>).tempThreads;
     if (!tempThreads || typeof tempThreads !== "object") continue;

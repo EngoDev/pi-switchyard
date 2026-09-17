@@ -18,7 +18,7 @@ const user = (text: string, timestamp: number, threadId?: string): TaggedAgentMe
   role: "user",
   content: [{ type: "text", text }],
   timestamp,
-  ...(threadId ? { jevRouter: { threadId, threadName: "temp" } } : {}),
+  ...(threadId ? { switchyard: { threadId, threadName: "temp" } } : {}),
 });
 
 const assistant = (text: string, timestamp: number, threadId?: string): TaggedAgentMessage => ({
@@ -37,7 +37,7 @@ const assistant = (text: string, timestamp: number, threadId?: string): TaggedAg
   },
   stopReason: "stop",
   timestamp,
-  ...(threadId ? { jevRouter: { threadId, threadName: "temp" } } : {}),
+  ...(threadId ? { switchyard: { threadId, threadName: "temp" } } : {}),
 });
 
 test("origin context excludes tagged temp prompts and assistant answers", () => {
@@ -138,7 +138,7 @@ test("temp compaction summary replaces old temp messages and keeps retained tail
       details: {
         readFiles: [],
         modifiedFiles: [],
-        jevRouter: {
+        switchyard: {
           threadAware: true,
           tempThreads: {
             t1: {
@@ -195,7 +195,7 @@ test("finds temp prompts and answers that need visible tree labels", () => {
   assert.deepEqual(findMissingTempLabels([userEntry, answerEntry], () => "already-labeled"), []);
 });
 
-test("custom-message temp metadata is restored from persisted details", () => {
+test("legacy custom-message temp metadata is restored into Switchyard metadata", () => {
   const messages = messagesFromEntries([{
     type: "custom_message",
     id: "entry1",
@@ -206,7 +206,7 @@ test("custom-message temp metadata is restored from persisted details", () => {
     display: false,
     details: { jevRouter: { threadId: "t1", threadName: "temp" } },
   }]);
-  assert.equal((messages[0] as TaggedAgentMessage | undefined)?.jevRouter?.threadId, "t1");
+  assert.equal((messages[0] as TaggedAgentMessage | undefined)?.switchyard?.threadId, "t1");
   assert.deepEqual(filterMessagesForOrigin(messages), []);
 });
 

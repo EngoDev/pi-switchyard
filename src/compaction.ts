@@ -4,7 +4,8 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { getRouterMetadata, messagesFromEntries } from "./threads.js";
 
-export const COMPACTION_FILES_ENTRY_TYPE = "jev-router-compaction-files";
+export const COMPACTION_FILES_ENTRY_TYPE = "switchyard-compaction-files";
+const LEGACY_COMPACTION_FILES_ENTRY_TYPE = "jev-router-compaction-files";
 
 export interface OriginCompactionInput {
   messagesToSummarize: AgentMessage[];
@@ -46,7 +47,7 @@ export type OriginCompactionOutcome =
         details: {
           readFiles: string[];
           modifiedFiles: string[];
-          jevRouter: {
+          switchyard: {
             version: 1;
             threadAware: true;
             excludedTempMessages: number;
@@ -83,7 +84,10 @@ export function findPreviousOriginFileLists(entries: readonly SessionEntry[]): {
 } | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry?.type !== "custom" || entry.customType !== COMPACTION_FILES_ENTRY_TYPE) continue;
+    if (
+      entry?.type !== "custom"
+      || (entry.customType !== COMPACTION_FILES_ENTRY_TYPE && entry.customType !== LEGACY_COMPACTION_FILES_ENTRY_TYPE)
+    ) continue;
     const data = entry.data as Record<string, unknown> | undefined;
     if (!data || !Array.isArray(data.readFiles) || !Array.isArray(data.modifiedFiles)) continue;
     return {
@@ -104,7 +108,7 @@ export function findPreviousOriginFileLists(entries: readonly SessionEntry[]): {
     const lists = fileListsFromCompaction(entry);
     if (!lists) return undefined;
     const details = entry.details as Record<string, unknown>;
-    const router = details.jevRouter;
+    const router = details.switchyard ?? details.jevRouter;
     if (router && typeof router === "object" && (router as Record<string, unknown>).threadAware === true) {
       return lists;
     }
@@ -189,7 +193,7 @@ export async function compactOriginThread(
         tokensBefore: input.tokensBefore,
         details: {
           ...fileLists,
-          jevRouter: {
+          switchyard: {
             version: 1,
             threadAware: true,
             excludedTempMessages,
@@ -216,7 +220,7 @@ export async function compactOriginThread(
         ...(result.usage ? { usage: result.usage } : {}),
         details: {
           ...fileLists,
-          jevRouter: {
+          switchyard: {
             version: 1,
             threadAware: true,
             excludedTempMessages,
@@ -242,7 +246,8 @@ export function collectTempCompactionInput(
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type !== "compaction" || !entry.details || typeof entry.details !== "object") continue;
-    const router = (entry.details as Record<string, unknown>).jevRouter;
+    const details = entry.details as Record<string, unknown>;
+    const router = details.switchyard ?? details.jevRouter;
     if (!router || typeof router !== "object") continue;
     const tempThreads = (router as Record<string, unknown>).tempThreads;
     if (!tempThreads || typeof tempThreads !== "object") continue;

@@ -1,4 +1,4 @@
-# Pi Jev Router
+# Pi Switchyard
 
 A [Pi](https://github.com/earendil-works/pi-mono) extension that uses TypeSafe AI's Jev model to select a logical conversation thread and a configured model tier before each idle user request.
 
@@ -32,7 +32,7 @@ For local development, link the package root as a global Pi extension directory.
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
-ln -s /absolute/path/to/pi-jev-router ~/.pi/agent/extensions/jev-router
+ln -s /absolute/path/to/pi-switchyard ~/.pi/agent/extensions/switchyard
 ```
 
 Then run `/reload` in Pi.
@@ -42,7 +42,7 @@ Then run `/reload` in Pi.
 Run:
 
 ```text
-/jev-router
+/switchyard
 ```
 
 The first menu lists `genius`, `smart`, `handy`, and `cheap` with each tier's current model and thinking level. Select only the category you want to change. Its model picker:
@@ -51,34 +51,34 @@ The first menu lists `genius`, `smart`, `handy`, and `cheap` with each tier's cu
 - Filters by model ID, provider, or model name as you type
 - Marks the category's current model
 
-After selecting a model, choose its thinking level and whether to save globally or for the current trusted project. Debug and enabled state are also editable from the first menu.
+After selecting a model, choose its thinking level and whether to save globally or for the current trusted project. The menu then reopens so several categories can be changed in one visit; press Escape in the main Switchyard menu to finish. Debug and enabled state are also editable from the first menu.
 
 Direct command forms:
 
 ```text
-/jev-router genius
-/jev-router smart
-/jev-router handy
-/jev-router cheap
-/jev-router show
-/jev-router debug
-/jev-router on
-/jev-router off
+/switchyard genius
+/switchyard smart
+/switchyard handy
+/switchyard cheap
+/switchyard show
+/switchyard debug
+/switchyard on
+/switchyard off
 ```
 
 Configuration is stored in:
 
-- Global: `~/.pi/agent/jev-router.json`
-- Project: `<cwd>/.pi/jev-router.json`
+- Global: `~/.pi/agent/switchyard.json`
+- Project: `<cwd>/.pi/switchyard.json`
 
-Project values override global values, but project configuration is ignored unless Pi considers the project trusted.
+Legacy `jev-router.json` files are still read for migration compatibility; new changes are written to `switchyard.json`. Project values override global values, but project configuration is ignored unless Pi considers the project trusted.
 
 ### Debug mode
 
 When `debug` is true, the footer shows the active logical thread, tier, model, and effective thinking level. Every successful decision also emits a notification with target and tier confidence, for example:
 
 ```text
-Jev route → temp:did-create-pr | cheap | openai/gpt-5.6-luna | thinking:high | confidence target:0.97 tier:0.99
+Switchyard route → temp:did-create-pr | cheap | openai/gpt-5.6-luna | thinking:high | confidence target:0.97 tier:0.99
 ```
 
 When `debug` is false, routing remains visually transparent except for normal Pi model/footer changes and `/tree` labels.

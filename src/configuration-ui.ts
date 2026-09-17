@@ -188,11 +188,11 @@ async function editDebug(ctx: ExtensionCommandContext, hooks: ConfigurationHooks
   if (!scope) return;
   const path = writeConfigPatch(ctx.cwd, scope, { debug: selected === "true" });
   finishConfigChange(ctx, hooks);
-  ctx.ui.notify(`Jev router debug ${hooks.getConfig().debug ? "enabled" : "disabled"} · ${path}`, "info");
+  ctx.ui.notify(`Switchyard debug ${hooks.getConfig().debug ? "enabled" : "disabled"} · ${path}`, "info");
 }
 
 async function editEnabled(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
-  const selected = await showPicker(ctx, "Enable Jev router", [
+  const selected = await showPicker(ctx, "Enable Switchyard", [
     { value: "true", label: "enabled" },
     { value: "false", label: "disabled" },
   ], { maxVisible: 4, preselect: String(hooks.getConfig().enabled) });
@@ -209,31 +209,45 @@ async function saveEnabled(
   if (!scope) return;
   const path = writeConfigPatch(ctx.cwd, scope, { enabled });
   finishConfigChange(ctx, hooks);
-  ctx.ui.notify(`Jev router ${hooks.getConfig().enabled ? "enabled" : "disabled"} · ${path}`, "info");
+  ctx.ui.notify(`Switchyard ${hooks.getConfig().enabled ? "enabled" : "disabled"} · ${path}`, "info");
 }
 
-async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
-  const selected = await showPicker(
-    ctx,
-    "Choose Jev router category to change",
-    buildCategoryItems(hooks.getConfig()),
-    { maxVisible: 9 },
-  );
-  if (!selected) return;
-  if (selected.startsWith("tier:")) {
-    await editTier(ctx, hooks, selected.slice("tier:".length) as TierName);
-  } else if (selected === "debug") {
-    await editDebug(ctx, hooks);
-  } else if (selected === "enabled") {
-    await editEnabled(ctx, hooks);
-  } else if (selected === "show") {
-    ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
+export async function runCategoryMenuLoop(
+  select: () => Promise<string | undefined>,
+  handle: (selection: string) => Promise<void>,
+): Promise<void> {
+  while (true) {
+    const selected = await select();
+    if (!selected) return;
+    await handle(selected);
   }
 }
 
+async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
+  await runCategoryMenuLoop(
+    () => showPicker(
+      ctx,
+      "Choose Switchyard category to change",
+      buildCategoryItems(hooks.getConfig()),
+      { maxVisible: 9 },
+    ),
+    async (selected) => {
+      if (selected.startsWith("tier:")) {
+        await editTier(ctx, hooks, selected.slice("tier:".length) as TierName);
+      } else if (selected === "debug") {
+        await editDebug(ctx, hooks);
+      } else if (selected === "enabled") {
+        await editEnabled(ctx, hooks);
+      } else if (selected === "show") {
+        ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
+      }
+    },
+  );
+}
+
 export function registerConfigurationCommand(pi: ExtensionAPI, hooks: ConfigurationHooks): void {
-  pi.registerCommand("jev-router", {
-    description: "Configure and inspect the Jev session/model router",
+  pi.registerCommand("switchyard", {
+    description: "Configure and inspect the Switchyard session/model router",
     handler: async (args, ctx) => {
       const direct = args.trim().toLowerCase();
       if ((TIER_NAMES as readonly string[]).includes(direct)) {
@@ -247,7 +261,7 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
       } else if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       } else {
-        ctx.ui.notify("Usage: /jev-router [genius|smart|handy|cheap|debug|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|on|off|show]", "error");
       }
     },
   });

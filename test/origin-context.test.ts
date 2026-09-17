@@ -10,7 +10,7 @@ const user = (text: string, timestamp: number, threadId?: string): TaggedAgentMe
   role: "user",
   content: [{ type: "text", text }],
   timestamp,
-  ...(threadId ? { jevRouter: { threadId, threadName: "temp" } } : {}),
+  ...(threadId ? { switchyard: { threadId, threadName: "temp" } } : {}),
 });
 
 const assistant = (text: string, timestamp: number): AgentMessage => ({
