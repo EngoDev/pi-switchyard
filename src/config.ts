@@ -11,7 +11,7 @@ export const DEFAULT_CONFIG: RouterConfig = {
   debug: false,
   tiers: {},
   routerContextMessages: 5,
-  initialParentMessages: 5,
+  initialOriginMessages: 5,
   targetConfidenceFloor: 0.15,
   tierConfidenceFloor: 0.45,
 };
@@ -64,8 +64,11 @@ function normalizePartial(value: unknown): Partial<RouterConfig> {
   if (typeof input.routerContextMessages === "number") {
     result.routerContextMessages = Math.max(1, Math.min(20, Math.trunc(input.routerContextMessages)));
   }
-  if (typeof input.initialParentMessages === "number") {
-    result.initialParentMessages = Math.max(1, Math.min(20, Math.trunc(input.initialParentMessages)));
+  const initialOriginMessages = typeof input.initialOriginMessages === "number"
+    ? input.initialOriginMessages
+    : input.initialParentMessages;
+  if (typeof initialOriginMessages === "number") {
+    result.initialOriginMessages = Math.max(1, Math.min(20, Math.trunc(initialOriginMessages)));
   }
   if (typeof input.targetConfidenceFloor === "number") {
     result.targetConfidenceFloor = Math.max(0, Math.min(1, input.targetConfidenceFloor));

@@ -20,7 +20,7 @@ test("debug status identifies thread, tier, model, and thinking", () => {
       tier: "cheap",
       targetConfidence: 0.9,
       tierConfidence: 0.9,
-      targetProbabilities: { thread1: 0.9 },
+      targetProbabilities: { thread1: 0.9, origin: 0.1 },
       tierProbabilities: { genius: 0, smart: 0, handy: 0.1, cheap: 0.9 },
     },
   }, "high");

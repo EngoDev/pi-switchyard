@@ -1,36 +1,36 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-import { getMessageText, toParentContextItem } from "./threads.js";
-import type { ParentContextItem, TaggedAgentMessage } from "./types.js";
+import { getMessageText, toOriginContextItem } from "./threads.js";
+import type { OriginContextItem, TaggedAgentMessage } from "./types.js";
 
-export const PARENT_CONTEXT_ROLES = ["user", "assistant", "toolResult", "custom"] as const;
-export type ParentContextRole = (typeof PARENT_CONTEXT_ROLES)[number];
-export type ParentContextOrder = "newest" | "oldest";
+export const ORIGIN_CONTEXT_ROLES = ["user", "assistant", "toolResult", "custom"] as const;
+export type OriginContextRole = (typeof ORIGIN_CONTEXT_ROLES)[number];
+export type OriginContextOrder = "newest" | "oldest";
 
-export interface ParentContextQuery {
+export interface OriginContextQuery {
   query?: string;
-  roles?: ParentContextRole[];
+  roles?: OriginContextRole[];
   offset?: number;
   limit?: number;
-  order?: ParentContextOrder;
+  order?: OriginContextOrder;
   includeToolResults?: boolean;
 }
 
-export function selectParentContext(
+export function selectOriginContext(
   messages: readonly AgentMessage[],
-  params: ParentContextQuery,
-): ParentContextItem[] {
-  const roles = new Set<ParentContextRole>(
+  params: OriginContextQuery,
+): OriginContextItem[] {
+  const roles = new Set<OriginContextRole>(
     params.roles ?? (params.includeToolResults ? ["user", "assistant", "toolResult"] : ["user", "assistant"]),
   );
   if (!params.includeToolResults) roles.delete("toolResult");
   const query = params.query?.trim().toLowerCase();
   let items = messages
     .filter((message) => !(message as TaggedAgentMessage).jevRouter)
-    .filter((message) => roles.has(message.role as ParentContextRole))
+    .filter((message) => roles.has(message.role as OriginContextRole))
     .filter((message) => !query || getMessageText(message).toLowerCase().includes(query))
-    .map(toParentContextItem)
-    .filter((item): item is ParentContextItem => item !== undefined);
+    .map(toOriginContextItem)
+    .filter((item): item is OriginContextItem => item !== undefined);
 
   if ((params.order ?? "newest") === "newest") items = items.reverse();
   const offset = Math.max(0, Math.trunc(params.offset ?? 0));
@@ -38,8 +38,8 @@ export function selectParentContext(
   return items.slice(offset, offset + limit);
 }
 
-export function formatParentContextResult(items: readonly ParentContextItem[]): string {
-  if (items.length === 0) return "No parent-session context matched the request.";
+export function formatOriginContextResult(items: readonly OriginContextItem[]): string {
+  if (items.length === 0) return "No origin-session context matched the request.";
   return items
     .map((item, index) => {
       const tool = item.toolName ? `:${item.toolName}` : "";

@@ -26,7 +26,7 @@ const config: RouterConfig = {
     cheap: { provider: "openai", modelId: "gpt-cheap", thinking: "off" },
   },
 };
-const parentContext = [
+const originContext = [
   { role: "user" as const, text: "Implement the new model router", timestamp: 1 },
   { role: "assistant" as const, text: "Implemented and tested the router", timestamp: 2 },
 ];
@@ -35,7 +35,7 @@ const prThread: TempThread = {
   name: "pull-request-check",
   createdAt: new Date(3).toISOString(),
   updatedAt: new Date(4).toISOString(),
-  seedContext: parentContext,
+  seedContext: originContext,
   firstPrompt: "Did you create a pull request?",
   lastUserText: "Did you create a pull request?",
   lastAssistantText: "No pull request exists yet. Would you like me to create one?",
@@ -52,7 +52,7 @@ for (const item of cases) {
   const decision = await decideRoute(routeClient, {
     prompt: item.prompt,
     hasImages: false,
-    parentContext,
+    originContext,
     threads: item.threads,
     config,
   });

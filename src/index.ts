@@ -18,15 +18,16 @@ import { isConfigured, loadConfig } from "./config.js";
 import { registerConfigurationCommand } from "./configuration-ui.js";
 import { decideRoute, type RouteClient } from "./router.js";
 import {
-  formatParentContextResult,
-  PARENT_CONTEXT_ROLES,
-  selectParentContext,
-} from "./parent-context.js";
+  formatOriginContextResult,
+  ORIGIN_CONTEXT_ROLES,
+  selectOriginContext,
+} from "./origin-context.js";
 import {
   createTempThread,
-  filterMessagesForParent,
+  filterMessagesForOrigin,
   filterMessagesForThread,
-  getParentContext,
+  findMissingTempLabels,
+  getOriginContext,
   messagesFromEntries,
   restoreThreads,
   updateThreadFromMessage,
@@ -43,7 +44,7 @@ import type {
 
 const ROUTER_ENTRY_TYPE = "jev-router";
 const STATUS_KEY = "jev-router";
-const PARENT_CONTEXT_TOOL = "get_context_from_parent";
+const ORIGIN_CONTEXT_TOOL = "get_context_from_origin";
 const CAPABILITY_ORDER: TierName[] = ["cheap", "handy", "smart", "genius"];
 
 function toRouteClient(client: TypeSafeClient): RouteClient {
@@ -54,18 +55,32 @@ function toRouteClient(client: TypeSafeClient): RouteClient {
   };
 }
 
+function normalizePersistedRoute(route: ActiveRoute): ActiveRoute {
+  const legacyOrigin = route.threadId === ("parent" as string);
+  const legacyTarget = route.decision.target === "parent";
+  return {
+    ...route,
+    threadId: legacyOrigin ? "origin" : route.threadId,
+    threadName: legacyOrigin ? "origin" : route.threadName,
+    decision: {
+      ...route.decision,
+      target: legacyTarget ? "origin" : route.decision.target,
+    },
+  };
+}
+
 function findLastRoute(entries: readonly SessionEntry[]): ActiveRoute | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type !== "custom" || entry.customType !== ROUTER_ENTRY_TYPE) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
-    if (data?.kind === "route") return data.route;
+    if (data?.kind === "route") return normalizePersistedRoute(data.route);
   }
   return undefined;
 }
 
 export function formatRouteStatus(route: ActiveRoute, effectiveThinking: ThinkingLevel): string {
-  const thread = route.threadId === "parent" ? "parent" : `temp:${route.threadName}`;
+  const thread = route.threadId === "origin" ? "origin" : `temp:${route.threadName}`;
   return `jev ${thread} · ${route.tier} · ${route.provider}/${route.modelId} · ${effectiveThinking}`;
 }
 
@@ -106,11 +121,11 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   let pendingRoutePrompt: string | undefined;
   let routeMetadataPersisted = false;
 
-  function setParentContextToolEnabled(enabled: boolean): void {
+  function setOriginContextToolEnabled(enabled: boolean): void {
     const active = pi.getActiveTools();
-    const isActive = active.includes(PARENT_CONTEXT_TOOL);
-    if (enabled && !isActive) pi.setActiveTools([...active, PARENT_CONTEXT_TOOL]);
-    if (!enabled && isActive) pi.setActiveTools(active.filter((name) => name !== PARENT_CONTEXT_TOOL));
+    const isActive = active.includes(ORIGIN_CONTEXT_TOOL);
+    if (enabled && !isActive) pi.setActiveTools([...active, ORIGIN_CONTEXT_TOOL]);
+    if (!enabled && isActive) pi.setActiveTools(active.filter((name) => name !== ORIGIN_CONTEXT_TOOL));
   }
 
   function clearDebugStatus(ctx: ExtensionContext): void {
@@ -127,6 +142,14 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     routeMetadataPersisted = false;
   }
 
+  function ensureTempTreeLabels(ctx: ExtensionContext): void {
+    const labels = findMissingTempLabels(
+      ctx.sessionManager.getBranch(),
+      (entryId) => ctx.sessionManager.getLabel(entryId),
+    );
+    for (const { entryId, label } of labels) pi.setLabel(entryId, label);
+  }
+
   function showDebugStatus(ctx: ExtensionContext, route: ActiveRoute): void {
     if (!config.debug) {
       clearDebugStatus(ctx);
@@ -136,28 +159,28 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerTool({
-    name: PARENT_CONTEXT_TOOL,
-    label: "Get Context From Parent",
-    description: "Retrieve a bounded, filtered slice of messages from the parent logical session. Available only in Jev-routed temp threads. Results are limited to 20 messages and 50KB.",
-    promptSnippet: "Retrieve additional context from the parent session when the temp thread's initial snapshot is insufficient",
+    name: ORIGIN_CONTEXT_TOOL,
+    label: "Get Context From Origin",
+    description: "Retrieve a bounded, filtered slice of messages from the origin logical session. Available only in Jev-routed temp threads. Results are limited to 20 messages and 50KB.",
+    promptSnippet: "Retrieve additional context from the origin session when the temp thread's initial snapshot is insufficient",
     promptGuidelines: [
-      "Use get_context_from_parent only when the current temp thread needs specific parent-session information that is absent from its initial snapshot.",
-      "Prefer a narrow query and small limit when using get_context_from_parent.",
+      "Use get_context_from_origin only when the current temp thread needs specific origin-session information that is absent from its initial snapshot.",
+      "Prefer a narrow query and small limit when using get_context_from_origin.",
     ],
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: "Case-insensitive text filter" })),
-      roles: Type.Optional(Type.Array(StringEnum(PARENT_CONTEXT_ROLES))),
+      roles: Type.Optional(Type.Array(StringEnum(ORIGIN_CONTEXT_ROLES))),
       offset: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, default: 5 })),
       order: Type.Optional(StringEnum(["newest", "oldest"] as const, { default: "newest" })),
       includeToolResults: Type.Optional(Type.Boolean({ default: false })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!activeRoute || activeRoute.threadId === "parent") {
-        throw new Error("get_context_from_parent is only available inside a routed temp thread");
+      if (!activeRoute || activeRoute.threadId === "origin") {
+        throw new Error("get_context_from_origin is only available inside a routed temp thread");
       }
-      const items = selectParentContext(getSessionMessages(ctx), params);
-      const raw = formatParentContextResult(items);
+      const items = selectOriginContext(getSessionMessages(ctx), params);
+      const raw = formatOriginContextResult(items);
       const truncation = truncateHead(raw, {
         maxBytes: DEFAULT_MAX_BYTES,
         maxLines: DEFAULT_MAX_LINES,
@@ -190,8 +213,9 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     config = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     restoreBranchState(ctx);
+    ensureTempTreeLabels(ctx);
     routeClient = undefined;
-    setParentContextToolEnabled(false);
+    setOriginContextToolEnabled(false);
 
     const apiKey = resolveTypeSafeApiKey();
     if (!apiKey) {
@@ -217,8 +241,9 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_tree", (_event, ctx) => {
-    setParentContextToolEnabled(false);
+    setOriginContextToolEnabled(false);
     restoreBranchState(ctx);
+    ensureTempTreeLabels(ctx);
     if (config.debug && routeClient && lastVisibleRoute) showDebugStatus(ctx, lastVisibleRoute);
     else clearDebugStatus(ctx);
   });
@@ -239,7 +264,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     const decision = await decideRoute(routeClient, {
       prompt: event.prompt,
       hasImages: (event.images?.length ?? 0) > 0,
-      parentContext: getParentContext(sessionMessages, config.routerContextMessages),
+      originContext: getOriginContext(sessionMessages, config.routerContextMessages),
       threads: [...threads.values()],
       config,
       ...(lastVisibleRoute
@@ -270,12 +295,12 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     if (decision.target === "new_temp") {
       targetThread = createTempThread(
         event.prompt,
-        getParentContext(sessionMessages, config.initialParentMessages),
+        getOriginContext(sessionMessages, config.initialOriginMessages),
         [...threads.values()].map((thread) => thread.name),
       );
       pendingThreadCreated = targetThread;
       threads.set(targetThread.id, targetThread);
-    } else if (decision.target !== "parent") {
+    } else if (decision.target !== "origin") {
       targetThread = threads.get(decision.target);
       if (!targetThread) {
         clearDebugStatus(ctx);
@@ -295,8 +320,8 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     }
 
     activeRoute = {
-      threadId: targetThread?.id ?? "parent",
-      threadName: targetThread?.name ?? "parent",
+      threadId: targetThread?.id ?? "origin",
+      threadName: targetThread?.name ?? "origin",
       tier: resolved.tier,
       provider: resolved.tierConfig.provider,
       modelId: resolved.tierConfig.modelId,
@@ -305,10 +330,10 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
     };
     lastVisibleRoute = activeRoute;
     pendingRoutePrompt = event.prompt;
-    setParentContextToolEnabled(activeRoute.threadId !== "parent");
+    setOriginContextToolEnabled(activeRoute.threadId !== "origin");
     showDebugStatus(ctx, activeRoute);
     if (config.debug) {
-      const thread = activeRoute.threadId === "parent" ? "parent" : `temp:${activeRoute.threadName}`;
+      const thread = activeRoute.threadId === "origin" ? "origin" : `temp:${activeRoute.threadName}`;
       ctx.ui.notify(
         `Jev route → ${thread} | ${activeRoute.tier} | ${activeRoute.provider}/${activeRoute.modelId} | thinking:${pi.getThinkingLevel()} | confidence target:${activeRoute.decision.targetConfidence.toFixed(2)} tier:${activeRoute.decision.tierConfidence.toFixed(2)}`,
         "info",
@@ -317,7 +342,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("message_end", (event) => {
-    if (!activeRoute || activeRoute.threadId === "parent") return;
+    if (!activeRoute || activeRoute.threadId === "origin") return;
     const metadata = {
       threadId: activeRoute.threadId,
       threadName: activeRoute.threadName,
@@ -342,19 +367,19 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 
   pi.on("context", (event) => {
     if (!activeRoute) return;
-    if (activeRoute.threadId === "parent") {
-      return { messages: filterMessagesForParent(event.messages) };
+    if (activeRoute.threadId === "origin") {
+      return { messages: filterMessagesForOrigin(event.messages) };
     }
     const thread = threads.get(activeRoute.threadId);
     if (!thread) return;
     return { messages: filterMessagesForThread(event.messages, thread) };
   });
 
-  pi.on("turn_start", (_event, ctx) => {
-    if (routeMetadataPersisted || !activeRoute || !pendingRoutePrompt) return;
+  pi.on("message_start", (event, ctx) => {
+    if (event.message.role !== "assistant" || routeMetadataPersisted || !activeRoute || !pendingRoutePrompt) return;
     const leafId = ctx.sessionManager.getLeafId();
     const leaf = leafId ? ctx.sessionManager.getEntry(leafId) : undefined;
-    if (activeRoute.threadId !== "parent" && leaf?.type === "message" && leaf.message.role === "user") {
+    if (activeRoute.threadId !== "origin" && leaf?.type === "message" && leaf.message.role === "user") {
       pi.setLabel(leaf.id, `temp:${activeRoute.threadName}`);
     }
     if (pendingThreadCreated) {
@@ -375,7 +400,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", () => {
-    setParentContextToolEnabled(false);
+    setOriginContextToolEnabled(false);
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
     pendingThreadCreated = undefined;
@@ -384,7 +409,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
-    setParentContextToolEnabled(false);
+    setOriginContextToolEnabled(false);
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
     activeRoute = undefined;
     pendingThreadCreated = undefined;

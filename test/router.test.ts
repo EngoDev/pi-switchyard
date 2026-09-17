@@ -23,7 +23,7 @@ function mockClient(target: string, tier: string, targetConfidence = 0.9, tierCo
         target: {
           choice: target,
           confidence: targetConfidence,
-          probabilities: { parent: 0.1, new_temp: 0.9, [target]: 0.9 },
+          probabilities: { origin: 0.1, new_temp: 0.9, [target]: 0.9 },
         },
         tier: {
           choice: tier,
@@ -44,7 +44,7 @@ test("Jev unavailability returns undefined instead of choosing a fallback", asyn
   const result = await decideRoute(client, {
     prompt: "Continue",
     hasImages: false,
-    parentContext: [],
+    originContext: [],
     threads: [],
     config,
   });
@@ -63,7 +63,7 @@ test("maps dynamic temp Choice options back to thread IDs", async () => {
   const result = await decideRoute(mockClient("temp_abc123", "cheap"), {
     prompt: "Yes, create it",
     hasImages: false,
-    parentContext: [],
+    originContext: [],
     threads: [thread],
     config,
   });
@@ -71,15 +71,15 @@ test("maps dynamic temp Choice options back to thread IDs", async () => {
   assert.equal(result?.tier, "cheap");
 });
 
-test("low target confidence stays on parent and low tier confidence upgrades", async () => {
+test("low target confidence stays on origin and low tier confidence upgrades", async () => {
   const result = await decideRoute(mockClient("new_temp", "cheap", 0.1, 0.1), {
     prompt: "Do something ambiguous",
     hasImages: false,
-    parentContext: [],
+    originContext: [],
     threads: [],
     config,
   });
-  assert.equal(result?.target, "parent");
+  assert.equal(result?.target, "origin");
   assert.equal(result?.tier, "handy");
   assert.equal(upgradeTier("genius"), "genius");
 });

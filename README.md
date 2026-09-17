@@ -7,8 +7,8 @@ A [Pi](https://github.com/earendil-works/pi-mono) extension that uses TypeSafe A
 - Routes among `genius`, `smart`, `handy`, and `cheap` tiers.
 - Keeps bounded side work in provider-isolated logical temp threads while preserving Pi's native transcript, reasoning, tools, and working UI.
 - Reuses relevant temp threads when a request follows an earlier aside.
-- Gives each new temp thread the last five parent user/assistant messages by default.
-- Makes `get_context_from_parent` available only during temp-thread turns for bounded, filtered retrieval.
+- Gives each new temp thread the last five origin user/assistant messages by default.
+- Makes `get_context_from_origin` available only during temp-thread turns for bounded, filtered retrieval.
 - Labels temp user turns as `temp:<thread-name>` in `/tree`.
 - Sends only bounded excerpts to Jev after best-effort credential redaction.
 - Performs no automatic routing, model switching, or context filtering when the TypeSafe key is absent or a Jev request fails or times out.
@@ -87,20 +87,20 @@ When `debug` is false, routing remains visually transparent except for normal Pi
 
 The extension sends one System One request containing two independent `Choice` questions:
 
-1. **Target thread:** parent, new temp, or one of the existing temp threads
+1. **Target thread:** origin, new temp, or one of the existing temp threads
 2. **Model tier:** genius, smart, handy, or cheap
 
 Code owns model selection, thinking configuration, context filtering, confidence policy, and side effects.
 
 Default confidence behavior:
 
-- Target confidence below `0.15`: stay on the parent thread
+- Target confidence below `0.15`: stay on the origin thread
 - Tier confidence below `0.45`: move up one capability tier
 - Missing/failed Jev response: do nothing and let Pi process the request normally
 
-## Parent context tool
+## Origin context tool
 
-`get_context_from_parent` supports:
+`get_context_from_origin` supports:
 
 - Case-insensitive text query
 - Role filters
@@ -109,7 +109,7 @@ Default confidence behavior:
 - Optional tool results
 - Maximum 20 messages and 50KB output
 
-Retrieved context becomes part of the current temp thread and is not sent to the parent model on later parent turns.
+Retrieved context becomes part of the current temp thread and is not sent to the origin model on later origin turns.
 
 ## Development
 
@@ -123,4 +123,4 @@ Source control is managed with Jujutsu (`jj`).
 
 ## Current limitation
 
-Logical thread metadata lives on individual messages. Manual compaction of a mixed parent/temp transcript is not yet thread-aware and may reduce the recoverable history of older temp threads. Normal provider context growth is bounded by the router, so automatic compaction should be uncommon.
+Logical thread metadata lives on individual messages. Manual compaction of a mixed origin/temp transcript is not yet thread-aware and may reduce the recoverable history of older temp threads. Normal provider context growth is bounded by the router, so automatic compaction should be uncommon.

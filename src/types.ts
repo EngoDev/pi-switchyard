@@ -16,7 +16,7 @@ export interface RouterConfig {
   debug: boolean;
   tiers: Partial<Record<TierName, TierConfig>>;
   routerContextMessages: number;
-  initialParentMessages: number;
+  initialOriginMessages: number;
   targetConfidenceFloor: number;
   tierConfidenceFloor: number;
 }
@@ -26,13 +26,13 @@ export interface TempThread {
   name: string;
   createdAt: string;
   updatedAt: string;
-  seedContext: ParentContextItem[];
+  seedContext: OriginContextItem[];
   firstPrompt: string;
   lastUserText?: string;
   lastAssistantText?: string;
 }
 
-export interface ParentContextItem {
+export interface OriginContextItem {
   role: "user" | "assistant" | "toolResult" | "custom";
   text: string;
   timestamp: number;
@@ -40,7 +40,7 @@ export interface ParentContextItem {
 }
 
 export interface RouteDecision {
-  target: "parent" | "new_temp" | string;
+  target: "origin" | "new_temp" | string;
   tier: TierName;
   targetConfidence: number;
   tierConfidence: number;
@@ -49,7 +49,7 @@ export interface RouteDecision {
 }
 
 export interface ActiveRoute {
-  threadId: "parent" | string;
+  threadId: "origin" | string;
   threadName: string;
   tier: TierName;
   provider: string;

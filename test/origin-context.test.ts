@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-import { formatParentContextResult, selectParentContext } from "../src/parent-context.js";
+import { formatOriginContextResult, selectOriginContext } from "../src/origin-context.js";
 import type { TaggedAgentMessage } from "../src/types.js";
 
 const user = (text: string, timestamp: number, threadId?: string): TaggedAgentMessage => ({
@@ -40,7 +40,7 @@ const toolResult = (text: string, timestamp: number): AgentMessage => ({
   timestamp,
 });
 
-test("retrieves bounded parent context newest first and excludes temp messages", () => {
+test("retrieves bounded origin context newest first and excludes temp messages", () => {
   const messages = [
     user("implement router", 1),
     assistant("working on router", 2),
@@ -48,14 +48,14 @@ test("retrieves bounded parent context newest first and excludes temp messages",
     user("did you make a PR", 4, "temp1"),
     user("add debug mode", 5),
   ];
-  const items = selectParentContext(messages, { limit: 2 });
+  const items = selectOriginContext(messages, { limit: 2 });
   assert.deepEqual(items.map((item) => item.text), ["add debug mode", "working on router"]);
 });
 
 test("supports role, query, offset, order, and tool-result filters", () => {
   const messages = [user("first", 1), toolResult("build passed", 2), assistant("second", 3)];
   assert.deepEqual(
-    selectParentContext(messages, {
+    selectOriginContext(messages, {
       query: "build",
       roles: ["toolResult"],
       includeToolResults: true,
@@ -65,11 +65,11 @@ test("supports role, query, offset, order, and tool-result filters", () => {
     }).map((item) => item.text),
     ["build passed"],
   );
-  assert.equal(selectParentContext(messages, { order: "oldest", offset: 1, limit: 1 })[0]?.text, "second");
+  assert.equal(selectOriginContext(messages, { order: "oldest", offset: 1, limit: 1 })[0]?.text, "second");
 });
 
 test("formats context with roles and tool names", () => {
-  const text = formatParentContextResult([
+  const text = formatOriginContextResult([
     { role: "toolResult", toolName: "bash", text: "ok", timestamp: 1 },
   ]);
   assert.match(text, /toolResult:bash/);

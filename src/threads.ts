@@ -4,7 +4,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type {
-  ParentContextItem,
+  OriginContextItem,
   RouterSessionEntryData,
   TaggedAgentMessage,
   TempThread,
@@ -45,12 +45,12 @@ export function getMessageText(message: AgentMessage): string {
     .trim();
 }
 
-export function toParentContextItem(message: AgentMessage): ParentContextItem | undefined {
+export function toOriginContextItem(message: AgentMessage): OriginContextItem | undefined {
   if (!(["user", "assistant", "toolResult", "custom"] as string[]).includes(message.role)) return undefined;
   const text = getMessageText(message);
   if (!text) return undefined;
-  const item: ParentContextItem = {
-    role: message.role as ParentContextItem["role"],
+  const item: OriginContextItem = {
+    role: message.role as OriginContextItem["role"],
     text,
     timestamp: message.timestamp,
   };
@@ -58,12 +58,12 @@ export function toParentContextItem(message: AgentMessage): ParentContextItem | 
   return item;
 }
 
-export function getParentContext(messages: readonly AgentMessage[], limit: number): ParentContextItem[] {
+export function getOriginContext(messages: readonly AgentMessage[], limit: number): OriginContextItem[] {
   return messages
     .filter((message) => !(message as TaggedAgentMessage).jevRouter)
     .filter((message) => message.role === "user" || message.role === "assistant")
-    .map(toParentContextItem)
-    .filter((item): item is ParentContextItem => item !== undefined)
+    .map(toOriginContextItem)
+    .filter((item): item is OriginContextItem => item !== undefined)
     .slice(-limit);
 }
 
@@ -113,7 +113,7 @@ export function makeThreadName(prompt: string, existingNames: Iterable<string>):
 
 export function createTempThread(
   prompt: string,
-  seedContext: ParentContextItem[],
+  seedContext: OriginContextItem[],
   existingNames: Iterable<string>,
   now = new Date(),
 ): TempThread {
@@ -155,10 +155,10 @@ export function restoreThreads(entries: readonly SessionEntry[]): Map<string, Te
   return threads;
 }
 
-export function formatSeedContext(items: readonly ParentContextItem[]): string {
-  if (items.length === 0) return "No parent messages were available when this temp thread was created.";
+export function formatSeedContext(items: readonly OriginContextItem[]): string {
+  if (items.length === 0) return "No origin messages were available when this temp thread was created.";
   return [
-    "Parent-session snapshot captured when this temp thread was created:",
+    "Origin-session snapshot captured when this temp thread was created:",
     ...items.map((item) => `[${item.role}] ${item.text}`),
   ].join("\n\n");
 }
@@ -178,6 +178,20 @@ export function filterMessagesForThread(
   return [seedMessage, ...threadMessages];
 }
 
-export function filterMessagesForParent(messages: readonly AgentMessage[]): AgentMessage[] {
+export function filterMessagesForOrigin(messages: readonly AgentMessage[]): AgentMessage[] {
   return messages.filter((message) => !(message as TaggedAgentMessage).jevRouter);
+}
+
+export function findMissingTempLabels(
+  entries: readonly SessionEntry[],
+  getLabel: (entryId: string) => string | undefined,
+): Array<{ entryId: string; label: string }> {
+  const missing: Array<{ entryId: string; label: string }> = [];
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    const metadata = (entry.message as TaggedAgentMessage).jevRouter;
+    if (!metadata || getLabel(entry.id)) continue;
+    missing.push({ entryId: entry.id, label: `temp:${metadata.threadName}` });
+  }
+  return missing;
 }

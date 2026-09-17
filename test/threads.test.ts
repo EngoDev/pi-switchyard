@@ -4,9 +4,10 @@ import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import {
-  filterMessagesForParent,
+  filterMessagesForOrigin,
   filterMessagesForThread,
-  getParentContext,
+  findMissingTempLabels,
+  getOriginContext,
   makeThreadName,
   messagesFromEntries,
 } from "../src/threads.js";
@@ -38,10 +39,10 @@ const assistant = (text: string, timestamp: number, threadId?: string): TaggedAg
   ...(threadId ? { jevRouter: { threadId, threadName: "temp" } } : {}),
 });
 
-test("parent context excludes tagged temp messages", () => {
+test("origin context excludes tagged temp messages", () => {
   const messages: AgentMessage[] = [user("main", 1), assistant("main answer", 2), user("aside", 3, "t1")];
-  assert.deepEqual(getParentContext(messages, 5).map((item) => item.text), ["main", "main answer"]);
-  assert.deepEqual(filterMessagesForParent(messages).map((message) => message.timestamp), [1, 2]);
+  assert.deepEqual(getOriginContext(messages, 5).map((item) => item.text), ["main", "main answer"]);
+  assert.deepEqual(filterMessagesForOrigin(messages).map((message) => message.timestamp), [1, 2]);
 });
 
 test("temp context contains a seed snapshot and only its own messages", () => {
@@ -58,6 +59,20 @@ test("temp context contains a seed snapshot and only its own messages", () => {
   assert.equal(filtered.length, 3);
   assert.match(JSON.stringify(filtered[0]), /Implement routing/);
   assert.deepEqual(filtered.slice(1).map((message) => message.timestamp), [2, 3]);
+});
+
+test("finds temp user entries that need visible tree labels", () => {
+  const entry = {
+    type: "message" as const,
+    id: "temp-user",
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    message: user("aside", 1, "t1"),
+  };
+  assert.deepEqual(findMissingTempLabels([entry], () => undefined), [
+    { entryId: "temp-user", label: "temp:temp" },
+  ]);
+  assert.deepEqual(findMissingTempLabels([entry], () => "already-labeled"), []);
 });
 
 test("custom-message temp metadata is restored from persisted details", () => {

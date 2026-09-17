@@ -2,12 +2,12 @@ import { choice, type ChoiceCriteria, type EntryType, type RequestOptions } from
 
 import { sanitizeForRouter } from "./privacy.js";
 import { TIER_NAMES, type RouteDecision, type RouterConfig, type TempThread, type TierName } from "./types.js";
-import type { ParentContextItem } from "./types.js";
+import type { OriginContextItem } from "./types.js";
 
 export interface RouteRequest {
   prompt: string;
   hasImages: boolean;
-  parentContext: ParentContextItem[];
+  originContext: OriginContextItem[];
   threads: TempThread[];
   config: RouterConfig;
   lastVisibleRoute?: {
@@ -69,15 +69,15 @@ function buildTargetCriteria(threads: readonly TempThread[]): {
   optionToThreadId: Map<string, string>;
 } {
   const criteria: ChoiceCriteria = {
-    parent: {
-      what: "Continue the primary work in the parent conversation.",
-      use_when: "The request advances, changes, verifies, or depends directly on the main task, or its result should remain in the main task's future context.",
+    origin: {
+      what: "Continue the primary work in the origin conversation.",
+      use_when: "The request advances, changes, verifies, or depends directly on the main task, or its result should remain in the origin task's future context.",
       not_for: "Bounded side questions, status checks, pull-request or branch administration, or unrelated work whose transcript would distract the main task.",
       examples: ["Continue implementing the router", "Use the design we agreed on to fix the remaining tests"],
     },
     new_temp: {
-      what: "Create a new isolated temporary thread seeded with a small snapshot of the parent.",
-      use_when: "The request is a bounded aside, status/admin operation, unrelated question, or independently completable task that does not belong in the primary task's future context.",
+      what: "Create a new isolated temporary thread seeded with a small snapshot of the origin.",
+      use_when: "The request is a bounded aside, status/admin operation, unrelated question, or independently completable task that does not belong in the origin task's future context.",
       not_for: "A follow-up to an existing temp thread or a direct continuation of the primary work.",
       examples: ["Did you create a pull request?", "What branch are we on?", "Explain an unrelated concept"],
     },
@@ -135,7 +135,7 @@ export async function decideRoute(client: RouteClient, request: RouteRequest): P
             text: sanitizeForRouter(request.prompt, 8_000),
             has_images: request.hasImages,
           },
-          parent_context: request.parentContext.map((item) => ({
+          origin_context: request.originContext.map((item) => ({
             role: item.role,
             text: sanitizeForRouter(item.text, 2_000),
             timestamp: item.timestamp,
@@ -174,9 +174,9 @@ export async function decideRoute(client: RouteClient, request: RouteRequest): P
     const targetAnswer = response.answers.target;
     const tierAnswer = response.answers.tier;
     let target = targetAnswer.choice;
-    if (targetAnswer.confidence < request.config.targetConfidenceFloor) target = "parent";
-    else if (optionToThreadId.has(target)) target = optionToThreadId.get(target) ?? "parent";
-    else if (target !== "parent" && target !== "new_temp") return undefined;
+    if (targetAnswer.confidence < request.config.targetConfidenceFloor) target = "origin";
+    else if (optionToThreadId.has(target)) target = optionToThreadId.get(target) ?? "origin";
+    else if (target !== "origin" && target !== "new_temp") return undefined;
 
     let tier = tierAnswer.choice as TierName;
     if (!TIER_NAMES.includes(tier)) return undefined;
