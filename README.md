@@ -2,6 +2,10 @@
 
 A [Pi](https://github.com/earendil-works/pi-mono) extension that uses TypeSafe AI's Jev model to select a logical conversation thread and a configured model tier before each idle user request.
 
+> **Experimental:** v0.1 is pre-1.0 software. Persisted session metadata and configuration may evolve between releases.
+>
+> **Security:** Pi extensions execute with the same system access as Pi. Review the source and pin a release ref before installing. Switchyard sends the current request and bounded context excerpts to TypeSafe AI; best-effort redaction is not a security boundary.
+
 ## Philosophy and intended use
 
 Switchyard makes one long-lived Pi conversation behave more like a practical workbench than a single ever-growing prompt. It preserves the **origin** thread for the work that matters, while placing bounded side work into reusable **temp** threads and selecting the least expensive configured capability tier that should complete each task reliably.
@@ -147,20 +151,27 @@ Temp turns are marked as `temp:<thread-name>` in `/tree`. The messages are store
 
 The key is read without being printed, logged, or copied into extension configuration. Conversation redaction is best-effort rather than a security boundary; the current request and bounded context excerpts are transmitted to TypeSafe for routing.
 
-## Install dependencies
+## Installation
+
+Install a published release with Pi's package manager:
 
 ```bash
-pnpm install
+pi install npm:pi-switchyard@0.1.0
 ```
 
-For local development, link the package root as a global Pi extension directory. Linking only `src/` breaks dependency resolution because Pi resolves packages from the extension's logical path:
+Review third-party Pi packages before installation: extensions execute arbitrary code with your user's permissions. Pinning an exact package version is recommended for reproducible installs.
+
+For development from source:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-ln -s /absolute/path/to/pi-switchyard ~/.pi/agent/extensions/switchyard
+git clone https://github.com/EngoDev/pi-switchyard.git
+cd pi-switchyard
+corepack enable
+pnpm install --frozen-lockfile
+pi install /absolute/path/to/pi-switchyard
 ```
 
-Then run `/reload` in Pi.
+Alternatively, link the package root under `~/.pi/agent/extensions/switchyard`. Linking only `src/` breaks dependency resolution because Pi resolves packages from the extension's logical path. Run `/reload` after changing a loaded checkout.
 
 ## Interactive configuration
 
@@ -335,11 +346,16 @@ Retrieved context becomes part of the current temp thread and is not sent to the
 
 ```bash
 pnpm check
-pnpm check:global-load
-pnpm evaluate:live  # uses the configured TypeSafe key and consumes API usage
+pnpm check:package-load
+pnpm check:global-load  # optional: verifies an existing global development link
+pnpm evaluate:live      # optional: consumes TypeSafe API usage
 ```
 
-Source control is managed with Jujutsu (`jj`).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance and [SECURITY.md](SECURITY.md) for private vulnerability reporting. Maintainers use Jujutsu (`jj`), but Git pull requests are welcome.
+
+## License
+
+[MIT](LICENSE)
 
 ## Single-use post-compaction switching window
 
