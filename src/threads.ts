@@ -4,6 +4,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
+import type { TransitionAudit } from "./switching.js";
 import type {
   ActiveRoute,
   OriginContextItem,
@@ -154,11 +155,19 @@ export function updateThreadFromMessage(thread: TempThread, message: AgentMessag
   if (message.role === "assistant") thread.lastAssistantText = text;
 }
 
-export function findRouteHistoryForThread(
+export interface RouteHistoryEntry {
+  route: ActiveRoute;
+  timestamp: string;
+  /** Present only for route entries persisted after task 26 introduced transition audits. */
+  audit?: TransitionAudit;
+}
+
+/** Route history for a thread, including the compact transition audit when the entry has one. */
+export function findRouteAuditHistoryForThread(
   entries: readonly SessionEntry[],
   threadId: string,
-): ActiveRoute[] {
-  const routes: ActiveRoute[] = [];
+): RouteHistoryEntry[] {
+  const history: RouteHistoryEntry[] = [];
   for (const entry of entries) {
     if (
       entry.type !== "custom"
@@ -168,13 +177,24 @@ export function findRouteHistoryForThread(
     if (data?.kind !== "route") continue;
     const routeThreadId = data.route.threadId === ("parent" as string) ? "origin" : data.route.threadId;
     if (routeThreadId !== threadId) continue;
-    routes.push({
-      ...data.route,
-      threadId: routeThreadId,
-      threadName: routeThreadId === "origin" ? "origin" : data.route.threadName,
+    history.push({
+      route: {
+        ...data.route,
+        threadId: routeThreadId,
+        threadName: routeThreadId === "origin" ? "origin" : data.route.threadName,
+      },
+      timestamp: data.timestamp,
+      ...(data.audit ? { audit: data.audit } : {}),
     });
   }
-  return routes;
+  return history;
+}
+
+export function findRouteHistoryForThread(
+  entries: readonly SessionEntry[],
+  threadId: string,
+): ActiveRoute[] {
+  return findRouteAuditHistoryForThread(entries, threadId).map((entry) => entry.route);
 }
 
 export function findLastRouteForThread(

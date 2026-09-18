@@ -52,11 +52,13 @@ import {
 } from "./origin-context.js";
 import {
   acceptTierRecommendation,
+  buildTransitionAudit,
   decideModelTransition,
   formatMinimalSwitchDecision,
   formatVerboseSwitchDecision,
   type ModelTransitionDecision,
   type RoutedModel,
+  type TransitionAudit,
   type TierRecommendationEvidence,
 } from "./switching.js";
 import { summarizeOriginBranch } from "./tree-summary.js";
@@ -66,6 +68,7 @@ import {
   findMissingTempLabels,
   findCurrentModelEpochUsage,
   findLastRouteForThread,
+  findRouteAuditHistoryForThread,
   findRouteHistoryForThread,
   findPendingPromotedPrompt,
   findRecoverableLifecycle,
@@ -78,6 +81,14 @@ import {
   threadContextFromEntries,
   updateThreadFromMessage,
 } from "./threads.js";
+import {
+  formatInspectReport,
+  resolveModelPricing,
+  summarizeCacheUsage,
+  summarizeRouteHistory,
+  type InspectSnapshot,
+  type ThreadInspection,
+} from "./inspect.js";
 import { TIER_NAMES } from "./types.js";
 import type {
   ActiveRoute,
@@ -409,6 +420,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   let lastVisibleRoute: ActiveRoute | undefined;
   let pendingThreadCreated: TempThread | undefined;
   let pendingRoutePrompt: string | undefined;
+  let pendingTransitionAudit: TransitionAudit | undefined;
   let pendingCompactionFileLists: { readFiles: string[]; modifiedFiles: string[] } | undefined;
   let pendingRouteDecision: PendingRouteDecision | undefined;
   let forcePromotedPrompt: ReturnType<typeof findPendingPromotedPrompt>;
@@ -442,6 +454,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     lastVisibleRoute = findLastRoute(branch);
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingTransitionAudit = undefined;
     pendingRouteDecision = undefined;
     forcePromotedPrompt = findPendingPromotedPrompt(branch);
     recoverablePromotion = findRecoverablePromotion(branch);
@@ -736,6 +749,67 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     },
   });
 
+  function buildInspectSnapshot(ctx: ExtensionContext): InspectSnapshot {
+    const branch = ctx.sessionManager.getBranch();
+    const descriptors: Array<{ id: string; name: string; thread?: TempThread }> = [
+      { id: "origin", name: "origin" },
+      ...[...threads.values()].map((thread) => ({ id: thread.id, name: `temp:${thread.name}`, thread })),
+    ];
+    const inspectedThreads: ThreadInspection[] = descriptors.map(({ id, name, thread }) => {
+      const incumbentRoute = findLastRouteForThread(branch, id);
+      const usages = incumbentRoute
+        ? findCurrentModelEpochUsage(branch, id, incumbentRoute.provider, incumbentRoute.modelId, 20)
+        : [];
+      const routeHistory = findRouteAuditHistoryForThread(branch, id);
+      const reset = getCacheResetOpportunity(branch, id);
+      const messages = threadMessagesForSwitching(ctx, id, thread);
+      const contextTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+      return {
+        id,
+        name,
+        active: lastVisibleRoute?.threadId === id,
+        ...(incumbentRoute
+          ? {
+              incumbent: {
+                tier: incumbentRoute.tier,
+                provider: incumbentRoute.provider,
+                modelId: incumbentRoute.modelId,
+                thinking: incumbentRoute.thinking,
+              },
+            }
+          : {}),
+        contextTokens,
+        ...(incumbentRoute ? { cacheUsage: summarizeCacheUsage(usages) } : {}),
+        ...(reset ? { resetOpportunity: { reason: reset.reason } } : {}),
+        recentRoutes: summarizeRouteHistory(routeHistory),
+        ...(routeHistory.at(-1)?.audit ? { latestAudit: routeHistory.at(-1)!.audit } : {}),
+      };
+    });
+    const pricing = TIER_NAMES.flatMap((tier) => {
+      const tierConfig = config.tiers[tier];
+      if (!tierConfig) return [];
+      return [resolveModelPricing(
+        { provider: tierConfig.provider, modelId: tierConfig.modelId },
+        ctx.modelRegistry.find(tierConfig.provider, tierConfig.modelId),
+        config.switching.economics,
+      )];
+    });
+    return {
+      generatedAt: new Date().toISOString(),
+      threads: inspectedThreads,
+      pricing,
+    };
+  }
+
+  async function inspect(ctx: ExtensionCommandContext): Promise<void> {
+    const report = formatInspectReport(buildInspectSnapshot(ctx));
+    if (ctx.mode === "tui") {
+      await ctx.ui.editor("Switchyard Inspect (read-only; edits are discarded)", report);
+    } else {
+      ctx.ui.notify(report, "info");
+    }
+  }
+
   registerConfigurationCommand(pi, {
     getConfig: () => config,
     reloadConfig: (ctx) => {
@@ -748,6 +822,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
         clearDebugStatus(ctx);
       }
     },
+    inspect,
     promotePending,
   });
 
@@ -1149,6 +1224,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     activeRoute = undefined;
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingTransitionAudit = undefined;
     routeMetadataPersisted = false;
 
     if (!routeClient || !config.enabled || !isConfigured(config)) {
@@ -1275,6 +1351,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     originFallbackForNext = false;
     lastVisibleRoute = activeRoute;
     pendingRoutePrompt = event.prompt;
+    pendingTransitionAudit = buildTransitionAudit(switchDecision);
     setOriginContextToolEnabled(activeRoute.threadId !== "origin");
     showDebugStatus(ctx, activeRoute);
     const thread = activeRoute.threadId === "origin" ? "origin" : `temp:${activeRoute.threadName}`;
@@ -1355,10 +1432,12 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       route: activeRoute,
       prompt: pendingRoutePrompt,
       timestamp: new Date().toISOString(),
+      ...(pendingTransitionAudit ? { audit: pendingTransitionAudit } : {}),
     } satisfies RouterSessionEntryData);
     routeMetadataPersisted = true;
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingTransitionAudit = undefined;
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -1368,6 +1447,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     activeRoute = undefined;
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingTransitionAudit = undefined;
     pendingRouteDecision = undefined;
     originFallbackForNext = false;
     routeMetadataPersisted = false;
@@ -1381,6 +1461,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     activeRoute = undefined;
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
+    pendingTransitionAudit = undefined;
     pendingRouteDecision = undefined;
     originFallbackForNext = false;
     routeMetadataPersisted = false;

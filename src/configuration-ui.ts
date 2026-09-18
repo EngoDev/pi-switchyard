@@ -83,6 +83,11 @@ export function buildCategoryItems(config: RouterConfig): SelectItem[] {
         : "off",
     },
     {
+      value: "inspect",
+      label: "inspect session",
+      description: "Threads, routes, cache state, evidence, and pricing",
+    },
+    {
       value: "show",
       label: "show configuration",
       description: "Display all current settings",
@@ -141,6 +146,7 @@ export interface ConfigurationHooks {
   getConfig(): RouterConfig;
   reloadConfig(ctx: ExtensionCommandContext): void;
   onDebugChanged(ctx: ExtensionCommandContext): void;
+  inspect?(ctx: ExtensionCommandContext): Promise<void>;
   promotePending?(ctx: ExtensionCommandContext, token: string): Promise<void>;
 }
 
@@ -457,6 +463,8 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
         await editTempLimits(ctx, hooks);
       } else if (selected === "switching") {
         await editSwitching(ctx, hooks);
+      } else if (selected === "inspect") {
+        await hooks.inspect?.(ctx);
       } else if (selected === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       }
@@ -483,10 +491,12 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
         await editSwitching(ctx, hooks);
       } else if (direct === "on" || direct === "off") {
         await saveEnabled(ctx, hooks, direct === "on");
+      } else if (direct === "inspect") {
+        await hooks.inspect?.(ctx);
       } else if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
       } else {
-        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|limits|switching|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|limits|switching|inspect|on|off|show]", "error");
       }
     },
   });

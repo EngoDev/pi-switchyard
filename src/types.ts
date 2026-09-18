@@ -1,4 +1,5 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { TransitionAudit } from "./switching.js";
 
 export const TIER_NAMES = ["genius", "smart", "handy", "cheap"] as const;
 export type TierName = (typeof TIER_NAMES)[number];
@@ -176,6 +177,8 @@ export interface PersistedRoute {
   route: ActiveRoute;
   prompt: string;
   timestamp: string;
+  /** Compact model-transition audit for this route decision. Absent on entries written before task 26. */
+  audit?: TransitionAudit;
 }
 
 export type RouterSessionEntryData =

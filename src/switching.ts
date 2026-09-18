@@ -668,6 +668,62 @@ export function decideModelTransition(rawInput: ModelTransitionInput): ModelTran
   };
 }
 
+/**
+ * Compact, JSON-serializable record of a single model-transition decision.
+ *
+ * Persisted alongside route entries so `/switchyard inspect` can reconstruct
+ * requested-vs-selected tiers/models, evidence, gates, forecast, and economics
+ * without needing live `Model` objects or re-running the policy.
+ */
+export interface SerializableDestinationEvaluation {
+  tier: TierName;
+  provider: string;
+  modelId: string;
+  evidence: DestinationEvidence;
+  gates: DestinationEvaluation["gates"];
+  economics?: SwitchEconomics;
+  forecast?: DowngradeForecast;
+}
+
+export interface TransitionAudit {
+  requestedTier: TierName;
+  requestedProvider: string;
+  requestedModelId: string;
+  reason: ModelSwitchReason;
+  cacheResetReason?: "compaction" | "branch-summary";
+  economics?: SwitchEconomics;
+  evidence?: Record<string, DestinationEvidence>;
+  forecast?: DowngradeForecast;
+  evaluations?: SerializableDestinationEvaluation[];
+}
+
+/** Strip `Model` objects from a transition decision for durable, compact persistence. */
+export function buildTransitionAudit(decision: ModelTransitionDecision): TransitionAudit {
+  return {
+    requestedTier: decision.requested.tier,
+    requestedProvider: decision.requested.tierConfig.provider,
+    requestedModelId: decision.requested.tierConfig.modelId,
+    reason: decision.reason,
+    ...(decision.cacheResetOpportunity ? { cacheResetReason: decision.cacheResetOpportunity.reason } : {}),
+    ...(decision.economics ? { economics: decision.economics } : {}),
+    ...(decision.evidence ? { evidence: decision.evidence } : {}),
+    ...(decision.forecast ? { forecast: decision.forecast } : {}),
+    ...(decision.evaluations
+      ? {
+          evaluations: decision.evaluations.map((evaluation): SerializableDestinationEvaluation => ({
+            tier: evaluation.destination.tier,
+            provider: evaluation.destination.tierConfig.provider,
+            modelId: evaluation.destination.tierConfig.modelId,
+            evidence: evaluation.evidence,
+            gates: evaluation.gates,
+            ...(evaluation.economics ? { economics: evaluation.economics } : {}),
+            ...(evaluation.forecast ? { forecast: evaluation.forecast } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
 function shortModel(value: RoutedModel): string {
   return `${value.tier}/${value.model.id}`;
 }

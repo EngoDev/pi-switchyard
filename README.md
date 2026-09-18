@@ -189,6 +189,7 @@ Direct command forms:
 /switchyard debug
 /switchyard limits
 /switchyard switching
+/switchyard inspect
 /switchyard on
 /switchyard off
 ```
@@ -199,6 +200,18 @@ Configuration is stored in:
 - Project: `<cwd>/.pi/switchyard.json`
 
 Legacy `jev-router.json` files are still read for migration compatibility; new changes are written to `switchyard.json`. Project values override global values, but project configuration is ignored unless Pi considers the project trusted.
+
+### Session inspection
+
+Run `/switchyard inspect` for an on-demand, read-only snapshot without enabling persistent verbose debug. It reports:
+
+- Origin and active temp threads, incumbents, thinking levels and compaction-aware context estimates
+- Current model cache-epoch observations and pending single-use compaction resets
+- Recent Jev requested tiers versus models Switchyard actually selected
+- Latest transition reason, evidence scores, failed gates, forecasts and economics when recorded
+- Configured tier pricing, its provenance (`pi-metadata`, `switchyard-override`, or `unknown`), and long-context tiers
+
+New routes persist a compact model-free audit record; old route entries remain readable, show less detail, and label their requested tier as a legacy decision rather than implying audit-level provenance. In TUI mode the report opens in an editor-style read-only view whose edits are discarded. Other modes emit the report through Pi's notification channel.
 
 ### Debug mode
 

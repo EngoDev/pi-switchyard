@@ -65,6 +65,7 @@ test("category menu shows every tier's current model and thinking", () => {
   assert.match(limits?.description ?? "", /32,000 tokens.*12 turns/);
   const switching = items.find((item) => item.value === "switching");
   assert.match(switching?.description ?? "", /enforce.*20%.*\$0\.001/);
+  assert.match(items.find((item) => item.value === "inspect")?.description ?? "", /Threads.*cache.*pricing/i);
 });
 
 test("Switchyard menu returns after each category change until the root menu is cancelled", async () => {
