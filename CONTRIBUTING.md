@@ -6,7 +6,7 @@ Thanks for helping improve Pi Switchyard.
 
 Requirements:
 
-- Node.js 20 or newer
+- Node.js 22.19 or newer
 - pnpm 10
 - Pi 0.85.1 or newer
 
@@ -17,6 +17,7 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm check
 pnpm check:package-load
+pnpm check:packed-package
 ```
 
 `pnpm evaluate:live` consumes TypeSafe API usage and is never required for ordinary changes or pull requests.
@@ -24,7 +25,7 @@ pnpm check:package-load
 ## Pull requests
 
 - Keep changes focused and include regression tests for behavior changes.
-- Run `pnpm check` and `pnpm check:package-load` before submitting.
+- Run `pnpm check`, `pnpm check:package-load`, and `pnpm check:packed-package` before submitting.
 - Update `README.md` and `CHANGELOG.md` when user-facing behavior changes.
 - Never commit credentials, session files, local configuration, or captured conversation content.
 - Explain compatibility or migration implications for persisted Switchyard session entries.

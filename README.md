@@ -79,7 +79,7 @@ The numbers are forecasts, not guarantees of provider-side caching or future beh
 Requirements:
 
 - Pi 0.85.1 or newer
-- Node.js 20 or newer
+- Node.js 22.19 or newer
 - A TypeSafe API key
 
 Install an exact release:
@@ -168,6 +168,7 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm check
 pnpm check:package-load
+pnpm check:packed-package
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance and [CHANGELOG.md](CHANGELOG.md) for release notes.

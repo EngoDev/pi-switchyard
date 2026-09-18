@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22]
+        node: ["22.19.0", 24]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,4 +29,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm check:package-load
+      - run: pnpm check:packed-package
       - run: npm publish --dry-run --ignore-scripts

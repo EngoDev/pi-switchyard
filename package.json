@@ -22,7 +22,7 @@
     "context-management"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "publishConfig": {
     "access": "public",
@@ -43,9 +43,10 @@
     "test": "tsx --test test/**/*.test.ts",
     "check": "pnpm typecheck && pnpm test",
     "check:package-load": "pi -ne -e . -p --no-session '/switchyard show'",
+    "check:packed-package": "node scripts/check-packed-package.mjs",
     "check:global-load": "cd /tmp && pi -p --no-session '/switchyard show'",
     "evaluate:live": "tsx scripts/evaluate-live.ts",
-    "prepublishOnly": "pnpm check && pnpm check:package-load"
+    "prepublishOnly": "pnpm check && pnpm check:package-load && pnpm check:packed-package"
   },
   "dependencies": {
     "@typesafe-ai/sdk": "^0.6.0",
@@ -62,11 +63,11 @@
     "typescript": "^5.9.2"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.85.1",
-    "@earendil-works/pi-ai": ">=0.85.1",
-    "@earendil-works/pi-coding-agent": ">=0.85.1",
-    "@earendil-works/pi-tui": ">=0.85.1",
-    "typebox": ">=1.0.0"
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "pi": {
     "extensions": [
