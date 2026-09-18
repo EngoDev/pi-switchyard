@@ -32,6 +32,11 @@ interface RouteResponse {
       probabilities: Record<string, number>;
     };
   };
+  /** Jev's own routing-call token usage. Optional because older SDK versions and test doubles omit it. */
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
 }
 
 export interface RouteClient {
@@ -194,6 +199,14 @@ export async function decideRoute(client: RouteClient, request: RouteRequest): P
       tierConfidence: tierAnswer.confidence,
       targetProbabilities: { ...targetAnswer.probabilities },
       tierProbabilities: normalizeTierProbabilities({ ...tierAnswer.probabilities }),
+      ...(response.usage
+        ? {
+            jevUsage: {
+              inputTokens: response.usage.input_tokens,
+              outputTokens: response.usage.output_tokens,
+            },
+          }
+        : {}),
     };
   } catch {
     return undefined;

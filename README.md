@@ -190,6 +190,7 @@ Direct command forms:
 /switchyard limits
 /switchyard switching
 /switchyard inspect
+/switchyard usage
 /switchyard pin
 /switchyard pin smart
 /switchyard pin-next cheap
@@ -217,6 +218,18 @@ Run `/switchyard inspect` for an on-demand, read-only snapshot without enabling 
 - Configured tier pricing, its provenance (`pi-metadata`, `switchyard-override`, or `unknown`), and long-context tiers
 
 New routes persist a compact model-free audit record; old route entries remain readable, show less detail, and label their requested tier as a legacy decision rather than implying audit-level provenance. In TUI mode the report opens in an editor-style read-only view whose edits are discarded. Other modes emit the report through Pi's notification channel.
+
+### Usage and estimate evaluation
+
+`/switchyard usage` reports persisted, branch-local execution economics:
+
+- Observed input/output/cache-read/cache-write tokens and actual reported cost by request, thread, and model
+- Pre-request warm-stay/cold-switch estimates beside—not confused with—the observed bill
+- Cache-hit behavior immediately after model switches versus stable epochs
+- Total model switches and rapid `A → B → A` returns per thread
+- Jev routing token overhead when TypeSafe reports it
+
+Switchyard records one aggregate after each settled request, including failed/retried attempts, proxy-substituted model responses, and nested tool usage when Pi reports it; these are real spend and are not discarded. A process/session interruption before `agent_settled` can leave no Switchyard aggregate for that in-flight request, although Pi's underlying message usage remains in its session entries. Estimates are counterfactual forecasts, so differences are never called measured savings. `/switchyard inspect` includes a compact version of the same report.
 
 ### Manual routing overrides
 

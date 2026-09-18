@@ -77,6 +77,15 @@ import {
 } from "./switching.js";
 import { summarizeOriginBranch } from "./tree-summary.js";
 import {
+  accumulateAssistantTurn,
+  buildUsageReportLines,
+  buildUsageSnapshot,
+  createUsageAccumulator,
+  formatUsageReport,
+  toPersistedUsageObserved,
+  type PendingUsageAccumulator,
+} from "./usage.js";
+import {
   createTempThread,
   filterMessagesForOrigin,
   findMissingTempLabels,
@@ -435,6 +444,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   let pendingThreadCreated: TempThread | undefined;
   let pendingRoutePrompt: string | undefined;
   let pendingTransitionAudit: TransitionAudit | undefined;
+  const pendingUsageObservations = new Map<string, PendingUsageAccumulator>();
   let pendingCompactionFileLists: { readFiles: string[]; modifiedFiles: string[] } | undefined;
   let pendingRouteDecision: PendingRouteDecision | undefined;
   let forcePromotedPrompt: ReturnType<typeof findPendingPromotedPrompt>;
@@ -481,6 +491,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
     pendingTransitionAudit = undefined;
+    pendingUsageObservations.clear();
     pendingRouteDecision = undefined;
     forcePromotedPrompt = findPendingPromotedPrompt(branch);
     recoverablePromotion = findRecoverablePromotion(branch);
@@ -924,10 +935,12 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
         config.switching.economics,
       )];
     });
+    const generatedAt = new Date().toISOString();
     return {
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       threads: inspectedThreads,
       pricing,
+      usage: buildUsageSnapshot(branch, generatedAt),
       ...(pendingNextOverride
         ? {
             nextOverride: {
@@ -948,6 +961,18 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     }
   }
 
+  async function usage(ctx: ExtensionCommandContext): Promise<void> {
+    const report = formatUsageReport(buildUsageSnapshot(
+      ctx.sessionManager.getBranch(),
+      new Date().toISOString(),
+    ));
+    if (ctx.mode === "tui") {
+      await ctx.ui.editor("Switchyard Usage (read-only; edits are discarded)", report);
+    } else {
+      ctx.ui.notify(report, "info");
+    }
+  }
+
   registerConfigurationCommand(pi, {
     getConfig: () => config,
     reloadConfig: (ctx) => {
@@ -961,6 +986,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       }
     },
     inspect,
+    usage,
     promotePending,
     getCurrentThread: () => currentLogicalThread(),
     getManualOverrideSummary: () => overrideStatusText(),
@@ -1554,6 +1580,17 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     lastVisibleRoute = activeRoute;
     pendingRoutePrompt = event.prompt;
     pendingTransitionAudit = buildTransitionAudit(switchDecision);
+    const usageRequestId = activeRoute.decision.requestId ?? uuidv7();
+    // Keep creation, message lookup, route persistence and durable observation on one key.
+    activeRoute.decision.requestId = usageRequestId;
+    if (!pendingUsageObservations.has(usageRequestId)) pendingUsageObservations.set(usageRequestId, createUsageAccumulator({
+      requestId: usageRequestId,
+      threadId: activeRoute.threadId,
+      threadName: activeRoute.threadName,
+      tier: activeRoute.tier,
+      provider: activeRoute.provider,
+      modelId: activeRoute.modelId,
+    }));
     setOriginContextToolEnabled(activeRoute.threadId !== "origin");
     showDebugStatus(ctx, activeRoute);
     const thread = activeRoute.threadId === "origin" ? "origin" : `temp:${activeRoute.threadName}`;
@@ -1570,6 +1607,14 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("message_end", (event) => {
+    const usageRequestId = activeRoute?.decision.requestId;
+    const usageAccumulator = usageRequestId ? pendingUsageObservations.get(usageRequestId) : undefined;
+    if (usageAccumulator && usageRequestId) {
+      pendingUsageObservations.set(
+        usageRequestId,
+        accumulateAssistantTurn(usageAccumulator, event.message),
+      );
+    }
     if (!activeRoute || activeRoute.threadId === "origin") return;
     const metadata = {
       threadId: activeRoute.threadId,
@@ -1643,6 +1688,15 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", (_event, ctx) => {
+    for (const accumulator of pendingUsageObservations.values()) {
+      if (accumulator.turnCount > 0 || accumulator.usage.totalTokens > 0 || accumulator.usage.cost.total > 0) {
+        pi.appendEntry(SWITCHYARD_ENTRY_TYPE, toPersistedUsageObserved(
+          accumulator,
+          new Date().toISOString(),
+        ));
+      }
+    }
+    pendingUsageObservations.clear();
     ensureTempTreeLabels(ctx);
     setOriginContextToolEnabled(false);
     if (pendingThreadCreated && !routeMetadataPersisted) threads.delete(pendingThreadCreated.id);
@@ -1664,6 +1718,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     pendingThreadCreated = undefined;
     pendingRoutePrompt = undefined;
     pendingTransitionAudit = undefined;
+    pendingUsageObservations.clear();
     pendingRouteDecision = undefined;
     originFallbackForNext = false;
     routeMetadataPersisted = false;

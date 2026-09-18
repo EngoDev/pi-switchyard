@@ -2,6 +2,7 @@ import type { Model, ModelCostRates, ModelCostTier, Usage } from "@earendil-work
 
 import type { RouteHistoryEntry } from "./threads.js";
 import type { TransitionAudit } from "./switching.js";
+import { buildUsageReportLines, type UsageSnapshot } from "./usage.js";
 import type { ModelEconomics, ThinkingSelection, TierName } from "./types.js";
 
 /**
@@ -148,6 +149,7 @@ export interface InspectSnapshot {
   pricing: ModelPricingSnapshot[];
   /** Pending one-shot override for the next accepted provider-bound request, if any. */
   nextOverride?: { target?: "origin"; tier?: TierName };
+  usage?: UsageSnapshot;
 }
 
 function formatTokens(tokens: number): string {
@@ -287,6 +289,9 @@ export function formatInspectReport(snapshot: InspectSnapshot): string {
   lines.push(`Threads (${snapshot.threads.length}):`);
   for (const thread of snapshot.threads) {
     lines.push(...formatThread(thread), "");
+  }
+  if (snapshot.usage) {
+    lines.push("Usage:", ...buildUsageReportLines(snapshot.usage).map((line) => `  ${line}`), "");
   }
   lines.push("Model pricing:");
   if (snapshot.pricing.length === 0) {

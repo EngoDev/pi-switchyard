@@ -1,4 +1,5 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { TransitionAudit } from "./switching.js";
 
 export const TIER_NAMES = ["genius", "smart", "handy", "cheap"] as const;
@@ -79,6 +80,11 @@ export interface OriginContextItem {
   toolName?: string;
 }
 
+export interface JevUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface RouteDecision {
   requestId?: string;
   target: "origin" | "new_temp_from_origin" | string;
@@ -87,6 +93,8 @@ export interface RouteDecision {
   tierConfidence: number;
   targetProbabilities: Record<string, number>;
   tierProbabilities: Record<TierName, number>;
+  /** Jev's own routing-call token usage, when the TypeSafe SDK reports it. */
+  jevUsage?: JevUsage;
 }
 
 export interface ActiveRoute {
@@ -181,6 +189,31 @@ export interface PersistedRoute {
   audit?: TransitionAudit;
 }
 
+/**
+ * Actual per-request model execution observation, persisted once an agent run settles.
+ *
+ * Keyed by the same stable `requestId` as the `route` entry it belongs to, so a usage
+ * report can join pre-execution estimate/audit data against observed billed usage
+ * without duplicating the estimate. Aggregates every assistant turn of the request
+ * (tool-loop turns, failed/retried attempts, steered continuations, and nested tool
+ * usage when reported). Absent for requests interrupted before the agent run settled.
+ */
+export interface PersistedUsageObserved {
+  kind: "usage-observed";
+  requestId: string;
+  threadId: string;
+  threadName: string;
+  tier: TierName;
+  provider: string;
+  modelId: string;
+  /** Number of provider assistant attempts aggregated into `usage`. */
+  turnCount: number;
+  usage: Usage;
+  /** Actual provider/model identifiers reported by responses; exposes proxy substitutions. */
+  reportedModels: string[];
+  timestamp: string;
+}
+
 export type RouterSessionEntryData =
   | PersistedThreadCreated
   | PersistedThreadRetired
@@ -190,4 +223,5 @@ export type RouterSessionEntryData =
   | PersistedPromotionCompleted
   | PersistedPromotedSession
   | PersistedPromotionConsumed
-  | PersistedRoute;
+  | PersistedRoute
+  | PersistedUsageObserved;

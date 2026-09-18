@@ -88,6 +88,11 @@ export function buildCategoryItems(config: RouterConfig, manualOverrideSummary?:
         : "off",
     },
     {
+      value: "usage",
+      label: "usage and estimate report",
+      description: "Observed costs, forecasts, cache hits, switches, and Jev overhead",
+    },
+    {
       value: "inspect",
       label: "inspect session",
       description: "Threads, routes, cache state, evidence, and pricing",
@@ -152,6 +157,7 @@ export interface ConfigurationHooks {
   reloadConfig(ctx: ExtensionCommandContext): void;
   onDebugChanged(ctx: ExtensionCommandContext): void;
   inspect?(ctx: ExtensionCommandContext): Promise<void>;
+  usage?(ctx: ExtensionCommandContext): Promise<void>;
   promotePending?(ctx: ExtensionCommandContext, token: string): Promise<void>;
   /** The logical thread a bare `/switchyard pin <tier>` or interactive "current logical thread" scope applies to. */
   getCurrentThread?(): { id: string; name: string };
@@ -509,6 +515,8 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
         await editTempLimits(ctx, hooks);
       } else if (selected === "switching") {
         await editSwitching(ctx, hooks);
+      } else if (selected === "usage") {
+        await hooks.usage?.(ctx);
       } else if (selected === "inspect") {
         await hooks.inspect?.(ctx);
       } else if (selected === "show") {
@@ -537,6 +545,8 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
         await editSwitching(ctx, hooks);
       } else if (direct === "on" || direct === "off") {
         await saveEnabled(ctx, hooks, direct === "on");
+      } else if (direct === "usage") {
+        await hooks.usage?.(ctx);
       } else if (direct === "inspect") {
         await hooks.inspect?.(ctx);
       } else if (direct === "show") {
@@ -567,7 +577,7 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
           ctx.ui.notify("Usage: /switchyard route origin", "error");
         }
       } else {
-        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|pin|pin-next|unpin|route|debug|limits|switching|inspect|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|pin|pin-next|unpin|route|debug|limits|switching|inspect|usage|on|off|show]", "error");
       }
     },
   });
