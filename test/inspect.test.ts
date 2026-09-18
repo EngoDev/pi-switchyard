@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Model, Usage } from "@earendil-works/pi-ai";
-import { formatInspectReport, resolveModelPricing, summarizeCacheUsage, summarizeRouteHistory } from "../src/inspect.js";
+import { formatInspectReport, formatThreadInspection, resolveModelPricing, summarizeCacheUsage, summarizeRouteHistory } from "../src/inspect.js";
 import { buildTransitionAudit, decideModelTransition, type RoutedModel } from "../src/switching.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import type { RouteHistoryEntry } from "../src/threads.js";
@@ -61,6 +61,13 @@ test("route inspection distinguishes requested and selected values with legacy f
   assert.equal(result[1]?.requestedTierSource, "audit");
   assert.equal(result[1]?.requestedModelId, "cheap");
   assert.equal(result[1]?.selectedModelId, "smart");
+});
+
+test("single-thread inspection exposes pin, incumbent and context", () => {
+  const text = formatThreadInspection({ id: "t1", name: "temp:one", active: false, pinnedTier: "smart", contextTokens: 123, recentRoutes: [], incumbent: { tier: "handy", provider: "test", modelId: "terra", thinking: "high" } });
+  assert.match(text, /manual pin: smart/);
+  assert.match(text, /handy.*test\/terra/);
+  assert.match(text, /123 tokens/);
 });
 
 test("inspect report renders threads, reset state, route audit and pricing provenance", () => {

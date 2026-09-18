@@ -212,6 +212,11 @@ function formatAudit(audit: TransitionAudit): string[] {
   return lines;
 }
 
+/** Single-thread read-only report for `/switchyard threads` → Inspect. */
+export function formatThreadInspection(thread: ThreadInspection): string {
+  return formatThread(thread).join("\n");
+}
+
 function formatThread(thread: ThreadInspection): string[] {
   const lines = [`${thread.active ? "●" : "○"} ${thread.name}${thread.active ? " [active]" : ""}`];
   if (thread.pinnedTier) lines.push(`  manual pin: ${thread.pinnedTier} (persists until /switchyard unpin)`);

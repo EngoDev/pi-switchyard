@@ -3,6 +3,8 @@ import test from "node:test";
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+
 import {
   filterMessagesForOrigin,
   filterMessagesForThread,
@@ -12,9 +14,11 @@ import {
   getOriginContext,
   makeThreadName,
   messagesFromEntries,
+  restoreThreads,
+  sanitizeThreadName,
   threadContextFromEntries,
 } from "../src/threads.js";
-import type { TaggedAgentMessage, TempThread } from "../src/types.js";
+import type { RouterSessionEntryData, TaggedAgentMessage, TempThread } from "../src/types.js";
 
 const user = (text: string, timestamp: number, threadId?: string): TaggedAgentMessage => ({
   role: "user",
@@ -472,4 +476,80 @@ test("an unrelated temp summary does not invalidate another temp's cache epoch",
 test("thread names are readable and unique", () => {
   assert.equal(makeThreadName("Did you create a PR for this?", []), "did-create-pr");
   assert.equal(makeThreadName("Did you create a PR for this?", ["did-create-pr"]), "did-create-pr-2");
+});
+
+test("sanitizeThreadName slugifies a rename request and de-duplicates against active names", () => {
+  assert.equal(sanitizeThreadName("OAuth Investigation!", []), "oauth-investigation");
+  assert.equal(sanitizeThreadName("oauth-investigation", ["oauth-investigation"]), "oauth-investigation-2");
+  assert.equal(sanitizeThreadName("oauth-investigation", ["oauth-investigation", "oauth-investigation-2"]), "oauth-investigation-3");
+  assert.equal(sanitizeThreadName("   ", []), undefined);
+  assert.equal(sanitizeThreadName("!!!", []), undefined);
+  assert.equal(sanitizeThreadName("x".repeat(80), [])?.length, 36);
+});
+
+test("a thread rename updates the live name while old routed messages keep their own embedded name", () => {
+  const thread: TempThread = {
+    id: "t1",
+    name: "oauth-check",
+    createdAt: new Date(1).toISOString(),
+    updatedAt: new Date(1).toISOString(),
+    firstPrompt: "Why did OAuth fail?",
+    seedContext: [],
+  };
+  const created: SessionEntry = {
+    type: "custom",
+    id: "created",
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    customType: "switchyard",
+    data: { kind: "thread-created", thread } satisfies RouterSessionEntryData,
+  };
+  const oldMessage: SessionEntry = {
+    type: "message",
+    id: "old-message",
+    parentId: "created",
+    timestamp: new Date(2).toISOString(),
+    message: {
+      ...user("before rename", 2, "t1"),
+      switchyard: { threadId: "t1", threadName: "oauth-check" },
+    } as TaggedAgentMessage,
+  };
+  const renamed: SessionEntry = {
+    type: "custom",
+    id: "renamed",
+    parentId: "old-message",
+    timestamp: new Date(3).toISOString(),
+    customType: "switchyard",
+    data: {
+      kind: "thread-renamed",
+      threadId: "t1",
+      oldName: "oauth-check",
+      newName: "oauth-race-condition",
+      timestamp: new Date(3).toISOString(),
+    } satisfies RouterSessionEntryData,
+  };
+  const restored = restoreThreads([created, oldMessage, renamed]);
+  assert.equal(restored.get("t1")?.name, "oauth-race-condition");
+  // The message tagged before the rename still carries its original embedded thread name; only
+  // the live thread object used for future labels/routing has changed.
+  assert.equal(
+    (oldMessage.type === "message" ? oldMessage.message as TaggedAgentMessage : undefined)?.switchyard?.threadName,
+    "oauth-check",
+  );
+
+  const retired: SessionEntry = {
+    type: "custom",
+    id: "retired",
+    parentId: "renamed",
+    timestamp: new Date(4).toISOString(),
+    customType: "switchyard",
+    data: {
+      kind: "thread-retired",
+      threadId: "t1",
+      threadName: "oauth-race-condition",
+      reason: "archived",
+      timestamp: new Date(4).toISOString(),
+    } satisfies RouterSessionEntryData,
+  };
+  assert.equal(restoreThreads([created, oldMessage, renamed, retired]).has("t1"), false);
 });

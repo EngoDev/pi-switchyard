@@ -10,8 +10,10 @@ import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-age
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   ensurePromotionMessagesDurable,
+  estimateTempThreadStats,
   fingerprintImages,
   formatTempThreadHandoff,
+  isSwitchyardHandoffPersisted,
   projectTempThreadBudget,
 } from "../src/lifecycle.js";
 import {
@@ -98,6 +100,50 @@ test("temp budget projects the held prompt and checks token and turn soft limits
   });
   assert.equal(byTokens.tokenLimitExceeded, true);
   assert.ok(byTokens.tokens > 1);
+});
+
+test("estimateTempThreadStats reports the same context/turns projectTempThreadBudget uses, without a hypothetical prompt", () => {
+  const entries = [
+    messageEntry("u1", user("Why did OAuth fail?", 1, "t1")),
+    messageEntry("a1", assistant("Checked the logs", 2, "t1"), "u1"),
+  ];
+  const stats = estimateTempThreadStats(entries, thread);
+  assert.equal(stats.turns, 1);
+  assert.ok(stats.tokens > 0);
+
+  const budget = projectTempThreadBudget(entries, thread, "Could logout fail too?", undefined, {
+    ...DEFAULT_CONFIG,
+    tempThreadSoftTokenLimit: 0,
+    tempThreadSoftTurnLimit: 0,
+  });
+  assert.equal(budget.turns, stats.turns + 1);
+  assert.ok(budget.tokens > stats.tokens);
+});
+
+test("isSwitchyardHandoffPersisted only matches a handoff custom message tagged with the given operation id", () => {
+  const handoffEntry = (id: string, operationId: string): SessionEntry => ({
+    type: "custom_message",
+    id,
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    customType: "switchyard-handoff",
+    content: "handoff text",
+    display: true,
+    details: { switchyardHandoff: { operationId, sourceThreadId: "t1", sourceThreadName: "oauth-check" } },
+  });
+  assert.equal(isSwitchyardHandoffPersisted([handoffEntry("h1", "op-1")], "op-1"), true);
+  assert.equal(isSwitchyardHandoffPersisted([handoffEntry("h1", "op-1")], "op-2"), false);
+  assert.equal(isSwitchyardHandoffPersisted([], "op-1"), false);
+  const unrelated: SessionEntry = {
+    type: "custom_message",
+    id: "other",
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    customType: "other-extension",
+    content: "unrelated",
+    display: false,
+  };
+  assert.equal(isSwitchyardHandoffPersisted([unrelated], "op-1"), false);
 });
 
 test("image fingerprints change when transformed attachments change", () => {

@@ -191,6 +191,7 @@ Direct command forms:
 /switchyard switching
 /switchyard inspect
 /switchyard usage
+/switchyard threads
 /switchyard pin
 /switchyard pin smart
 /switchyard pin-next cheap
@@ -218,6 +219,18 @@ Run `/switchyard inspect` for an on-demand, read-only snapshot without enabling 
 - Configured tier pricing, its provenance (`pi-metadata`, `switchyard-override`, or `unknown`), and long-context tiers
 
 New routes persist a compact model-free audit record; old route entries remain readable, show less detail, and label their requested tier as a legacy decision rather than implying audit-level provenance. In TUI mode the report opens in an editor-style read-only view whose edits are discarded. Other modes emit the report through Pi's notification channel.
+
+### Temp thread management
+
+Run `/switchyard threads` in TUI mode for a bounded, filterable list of active temp threads showing incumbent model, estimated context size, and turn count. Select a thread to:
+
+- **Inspect** its full read-only diagnostics
+- **Rename** future display labels without rewriting historical tagged messages
+- **Retire** it with confirmation while preserving history in the session tree
+- **Summarize into origin**, verifying a visibly attributed handoff before archival
+- **Promote to a child session**, transferring its origin seed and replayable history without temp tags; the child is persisted and verified before the source thread retires
+
+Explicit promotion is user-visible: Pi switches to the child session and leaves it ready for the next prompt. Interrupted promotion uses the same durable source recovery state as automatic lifecycle promotion. Thread management is intentionally unavailable in non-TUI modes.
 
 ### Usage and estimate evaluation
 

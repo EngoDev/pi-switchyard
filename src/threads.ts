@@ -129,6 +129,27 @@ export function makeThreadName(prompt: string, existingNames: Iterable<string>):
   return `${base}-${suffix}`;
 }
 
+/**
+ * Sanitizes a user-supplied rename request into the same slug shape as `makeThreadName`,
+ * de-duplicated against other active thread names. Returns undefined when the input has no
+ * usable characters (letters, digits, or hyphens) after sanitization.
+ */
+export function sanitizeThreadName(input: string, existingNames: Iterable<string>): string | undefined {
+  const existing = new Set(existingNames);
+  const base = input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 36)
+    .replace(/-+$/g, "");
+  if (!base) return undefined;
+  if (!existing.has(base)) return base;
+  let suffix = 2;
+  while (existing.has(`${base}-${suffix}`)) suffix += 1;
+  return `${base}-${suffix}`;
+}
+
 export function createTempThread(
   prompt: string,
   seedContext: OriginContextItem[],
@@ -265,6 +286,10 @@ export function restoreThreads(entries: readonly SessionEntry[]): Map<string, Te
     if (entry.type !== "custom" || (entry.customType !== "switchyard" && entry.customType !== "jev-router")) continue;
     const data = entry.data as RouterSessionEntryData | undefined;
     if (data?.kind === "thread-created") threads.set(data.thread.id, { ...data.thread });
+    if (data?.kind === "thread-renamed") {
+      const thread = threads.get(data.threadId);
+      if (thread) thread.name = data.newName;
+    }
     if (data?.kind === "promotion-pending") recoverablePromotions.set(data.token, { ...data.thread });
     if (data?.kind === "promotion-completed") recoverablePromotions.delete(data.token);
     if (data?.kind === "thread-retired") {

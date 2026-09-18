@@ -88,6 +88,11 @@ export function buildCategoryItems(config: RouterConfig, manualOverrideSummary?:
         : "off",
     },
     {
+      value: "threads",
+      label: "manage active temp threads",
+      description: "Inspect, rename, retire, summarize, or promote this branch's temp threads",
+    },
+    {
       value: "usage",
       label: "usage and estimate report",
       description: "Observed costs, forecasts, cache hits, switches, and Jev overhead",
@@ -158,6 +163,8 @@ export interface ConfigurationHooks {
   onDebugChanged(ctx: ExtensionCommandContext): void;
   inspect?(ctx: ExtensionCommandContext): Promise<void>;
   usage?(ctx: ExtensionCommandContext): Promise<void>;
+  /** Bounded/filterable list of active branch temp threads with inspect/rename/retire/summarize/promote actions. */
+  manageThreads?(ctx: ExtensionCommandContext): Promise<void>;
   promotePending?(ctx: ExtensionCommandContext, token: string): Promise<void>;
   /** The logical thread a bare `/switchyard pin <tier>` or interactive "current logical thread" scope applies to. */
   getCurrentThread?(): { id: string; name: string };
@@ -515,6 +522,8 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
         await editTempLimits(ctx, hooks);
       } else if (selected === "switching") {
         await editSwitching(ctx, hooks);
+      } else if (selected === "threads") {
+        await hooks.manageThreads?.(ctx);
       } else if (selected === "usage") {
         await hooks.usage?.(ctx);
       } else if (selected === "inspect") {
@@ -545,6 +554,8 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
         await editSwitching(ctx, hooks);
       } else if (direct === "on" || direct === "off") {
         await saveEnabled(ctx, hooks, direct === "on");
+      } else if (direct === "threads") {
+        await hooks.manageThreads?.(ctx);
       } else if (direct === "usage") {
         await hooks.usage?.(ctx);
       } else if (direct === "inspect") {
@@ -577,7 +588,7 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
           ctx.ui.notify("Usage: /switchyard route origin", "error");
         }
       } else {
-        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|pin|pin-next|unpin|route|debug|limits|switching|inspect|usage|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|pin|pin-next|unpin|route|debug|limits|switching|inspect|threads|usage|on|off|show]", "error");
       }
     },
   });

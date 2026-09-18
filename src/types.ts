@@ -127,7 +127,37 @@ export interface PersistedThreadRetired {
   kind: "thread-retired";
   threadId: string;
   threadName: string;
-  reason: "summarized-to-origin" | "promoted";
+  reason: "summarized-to-origin" | "promoted" | "archived";
+  timestamp: string;
+}
+
+/**
+ * Records a display-name change for an active temp thread, persisted for `/switchyard threads`.
+ *
+ * Renaming only affects the live `TempThread.name` used for future labels, routing metadata, and
+ * display; messages tagged before the rename keep their own embedded `threadName` and remain
+ * recognized only by the stable `threadId`, never by name.
+ */
+export interface PersistedThreadRenamed {
+  kind: "thread-renamed";
+  threadId: string;
+  oldName: string;
+  newName: string;
+  timestamp: string;
+}
+
+/**
+ * Informational marker written into a child session created by explicit `/switchyard threads`
+ * promotion. Unlike `PersistedPromotedSession`, it carries no pending prompt and does not
+ * participate in origin-forcing/consumption state machinery: the user explicitly promoted the
+ * thread, so the child session opens with a ready, empty editor instead.
+ */
+export interface PersistedThreadPromoted {
+  kind: "thread-promoted";
+  sourceSession?: string;
+  sourceEntryId?: string;
+  sourceThreadId: string;
+  sourceThreadName: string;
   timestamp: string;
 }
 
@@ -217,6 +247,8 @@ export interface PersistedUsageObserved {
 export type RouterSessionEntryData =
   | PersistedThreadCreated
   | PersistedThreadRetired
+  | PersistedThreadRenamed
+  | PersistedThreadPromoted
   | PersistedLifecyclePending
   | PersistedLifecycleCompleted
   | PersistedPromotionPending

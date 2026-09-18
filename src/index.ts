@@ -54,10 +54,13 @@ import {
 } from "./overrides.js";
 import {
   ensurePromotionMessagesDurable,
+  estimateTempThreadStats,
   fingerprintImages,
   formatTempThreadHandoff,
+  isSwitchyardHandoffPersisted,
   projectTempThreadBudget,
 } from "./lifecycle.js";
+import { showPicker } from "./picker.js";
 import { decideRoute, type RouteClient } from "./router.js";
 import {
   formatOriginContextResult,
@@ -101,11 +104,19 @@ import {
   messagesForPromotedSession,
   messagesFromEntries,
   restoreThreads,
+  sanitizeThreadName,
   threadContextFromEntries,
   updateThreadFromMessage,
 } from "./threads.js";
 import {
+  buildThreadSelectItems,
+  buildThreadSummaryRows,
+  THREAD_ACTION_ITEMS,
+  type ThreadManagementAction,
+} from "./thread-management.js";
+import {
   formatInspectReport,
+  formatThreadInspection,
   resolveModelPricing,
   summarizeCacheUsage,
   summarizeRouteHistory,
@@ -850,6 +861,291 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     }
   }
 
+  /**
+   * Restores a temp thread that a `/switchyard threads` explicit promotion could not durably
+   * complete. Unlike `restorePromotionAfterCancellation`, there is no held prompt/images to put
+   * back into the editor: the user explicitly triggered this action, not a budget-driven prompt.
+   */
+  function restoreExplicitPromotion(thread: TempThread, token: string, ctx: ExtensionCommandContext): void {
+    threads.set(thread.id, thread);
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "thread-created",
+      thread,
+    } satisfies RouterSessionEntryData);
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "promotion-completed",
+      token,
+      outcome: "cancelled",
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    ctx.ui.notify(`Promotion of temp:${thread.name} was cancelled; the thread remains active`, "info");
+  }
+
+  /**
+   * Explicit `/switchyard threads` → Promote to child session. Unlike the budget-driven
+   * `promotePending` flow, there is no pending prompt to auto-submit: the user asked to promote
+   * this thread right now, so the child session opens with a ready, empty editor instead of the
+   * hidden pending-message/forced-origin machinery `promoted-session` entries drive.
+   *
+   * Two-phase durability: the child session (with its origin seed, replayable stripped history,
+   * and a `thread-promoted` marker) is created and verified before the source session's
+   * completion/retirement entries are written. A crash between the pending marker and completion
+   * leaves the thread recoverable via `findRecoverablePromotion`, exactly like the budget-driven
+   * flow.
+   */
+  async function promoteThreadExplicit(ctx: ExtensionCommandContext, thread: TempThread): Promise<void> {
+    if (!ctx.model) {
+      ctx.ui.notify("Promoting to a child session requires an active model", "error");
+      return;
+    }
+    const parentSession = ctx.sessionManager.getSessionFile();
+    if (!parentSession) {
+      ctx.ui.notify("Promoting to a child session requires a persisted session", "error");
+      return;
+    }
+    const model = ctx.model;
+    const branch = ctx.sessionManager.getBranch();
+    const sourceEntryId = findThreadBranchPoint(branch, thread.id);
+    const threadSnapshot: TempThread = { ...thread, seedContext: [...thread.seedContext] };
+    const messages = ensurePromotionMessagesDurable(
+      messagesForPromotedSession(branch, threadSnapshot),
+      model,
+    );
+    const token = uuidv7().replaceAll("-", "");
+
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "promotion-pending",
+      token,
+      thread: threadSnapshot,
+      pendingPrompt: "",
+      pendingImageCount: 0,
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    threads.delete(threadSnapshot.id);
+    if (lastVisibleRoute?.threadId === threadSnapshot.id) lastVisibleRoute = undefined;
+
+    let replacementStarted = false;
+    try {
+      const result = await ctx.newSession({
+        parentSession,
+        setup: async (sessionManager) => {
+          for (const message of messages) {
+            sessionManager.appendMessage(message as Parameters<typeof sessionManager.appendMessage>[0]);
+          }
+          sessionManager.appendSessionInfo(`Promoted: ${threadSnapshot.name}`);
+          sessionManager.appendCustomEntry(SWITCHYARD_ENTRY_TYPE, {
+            kind: "thread-promoted",
+            sourceSession: parentSession,
+            sourceThreadId: threadSnapshot.id,
+            sourceThreadName: threadSnapshot.name,
+            ...(sourceEntryId !== undefined ? { sourceEntryId } : {}),
+            timestamp: new Date().toISOString(),
+          } satisfies RouterSessionEntryData);
+        },
+        withSession: async (newContext) => {
+          replacementStarted = true;
+          const childSession = newContext.sessionManager.getSessionFile();
+          const childVerified = Boolean(
+            childSession
+            && existsSync(childSession)
+            && newContext.sessionManager.getBranch().some((candidate) =>
+              candidate.type === "custom"
+              && (candidate.customType === SWITCHYARD_ENTRY_TYPE || candidate.customType === LEGACY_ROUTER_ENTRY_TYPE)
+              && (candidate.data as RouterSessionEntryData | undefined)?.kind === "thread-promoted"),
+          );
+          if (!childVerified) {
+            newContext.ui.notify(
+              `Promoted temp:${threadSnapshot.name}, but its history could not be verified in the new session`,
+              "warning",
+            );
+            return;
+          }
+          try {
+            const sourceSession = SessionManager.open(parentSession);
+            sourceSession.appendCustomEntry(SWITCHYARD_ENTRY_TYPE, {
+              kind: "thread-retired",
+              threadId: threadSnapshot.id,
+              threadName: threadSnapshot.name,
+              reason: "promoted",
+              timestamp: new Date().toISOString(),
+            } satisfies RouterSessionEntryData);
+            sourceSession.appendCustomEntry(SWITCHYARD_ENTRY_TYPE, {
+              kind: "promotion-completed",
+              token,
+              ...(childSession ? { childSession } : {}),
+              outcome: "completed",
+              timestamp: new Date().toISOString(),
+            } satisfies RouterSessionEntryData);
+          } catch {
+            // The child is already durable and visible; the source keeps its pending marker for later recovery.
+          }
+          newContext.ui.setEditorText("");
+          newContext.ui.notify(`Promoted temp:${threadSnapshot.name} into this child session`, "info");
+        },
+      });
+      if (result.cancelled) restoreExplicitPromotion(threadSnapshot, token, ctx);
+    } catch (error) {
+      if (!replacementStarted && !runtimeInvalidated) {
+        restoreExplicitPromotion(threadSnapshot, token, ctx);
+        ctx.ui.notify(
+          `Could not promote temp:${threadSnapshot.name}: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
+    }
+  }
+
+  async function renameThreadAction(ctx: ExtensionCommandContext, thread: TempThread): Promise<void> {
+    const input = await ctx.ui.input(`Rename temp:${thread.name}`, thread.name);
+    if (input === undefined) return;
+    const existingNames = [...threads.values()]
+      .filter((candidate) => candidate.id !== thread.id)
+      .map((candidate) => candidate.name);
+    const sanitized = sanitizeThreadName(input, existingNames);
+    if (!sanitized) {
+      ctx.ui.notify("Enter a name with at least one letter or number", "error");
+      return;
+    }
+    if (sanitized === thread.name) return;
+    const oldName = thread.name;
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "thread-renamed",
+      threadId: thread.id,
+      oldName,
+      newName: sanitized,
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    thread.name = sanitized;
+    if (lastVisibleRoute?.threadId === thread.id) lastVisibleRoute = { ...lastVisibleRoute, threadName: sanitized };
+    refreshOverrideStatus(ctx);
+    ctx.ui.notify(
+      `Renamed temp:${oldName} \u2192 temp:${sanitized}. History tagged before the rename keeps its original label.`,
+      "info",
+    );
+  }
+
+  async function retireThreadAction(ctx: ExtensionCommandContext, thread: TempThread): Promise<void> {
+    const confirmed = await ctx.ui.confirm(
+      `Retire temp:${thread.name}?`,
+      "This archives the thread from active routing. Its history remains in this session and stays visible in /tree.",
+    );
+    if (!confirmed) return;
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "thread-retired",
+      threadId: thread.id,
+      threadName: thread.name,
+      reason: "archived",
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    threads.delete(thread.id);
+    if (lastVisibleRoute?.threadId === thread.id) lastVisibleRoute = undefined;
+    refreshOverrideStatus(ctx);
+    ctx.ui.notify(`Archived temp:${thread.name}. Its history remains available in this session.`, "info");
+  }
+
+  async function summarizeThreadIntoOriginAction(ctx: ExtensionCommandContext, thread: TempThread): Promise<void> {
+    const outcome = await summarizeTempForLifecycle(thread, ctx);
+    if (outcome.action === "cancelled") {
+      if (!outcome.stale) ctx.ui.notify(`Summarization of temp:${thread.name} was cancelled`, "info");
+      return;
+    }
+    if (outcome.action === "error") {
+      ctx.ui.notify(
+        `Could not summarize temp:${thread.name}: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`,
+        "error",
+      );
+      return;
+    }
+    const summary = outcome.result;
+    const handoffOperationId = uuidv7();
+    pi.sendMessage({
+      customType: "switchyard-handoff",
+      content: formatTempThreadHandoff(thread, summary.summary),
+      display: true,
+      details: {
+        switchyardHandoff: {
+          operationId: handoffOperationId,
+          sourceThreadId: thread.id,
+          sourceThreadName: thread.name,
+          usage: summary.usage,
+        },
+      },
+    });
+    if (!isSwitchyardHandoffPersisted(ctx.sessionManager.getBranch(), handoffOperationId)) {
+      ctx.ui.notify(
+        `Could not verify the origin handoff for temp:${thread.name}; the thread was not retired`,
+        "error",
+      );
+      return;
+    }
+    pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {
+      kind: "thread-retired",
+      threadId: thread.id,
+      threadName: thread.name,
+      reason: "summarized-to-origin",
+      timestamp: new Date().toISOString(),
+    } satisfies RouterSessionEntryData);
+    threads.delete(thread.id);
+    if (lastVisibleRoute?.threadId === thread.id) lastVisibleRoute = undefined;
+    refreshOverrideStatus(ctx);
+    ctx.ui.notify(`Summarized temp:${thread.name} into origin and retired it`, "info");
+  }
+
+  async function inspectThreadAction(ctx: ExtensionCommandContext, thread: TempThread): Promise<void> {
+    const snapshot = buildInspectSnapshot(ctx);
+    const entry = snapshot.threads.find((candidate) => candidate.id === thread.id);
+    const report = entry
+      ? formatThreadInspection(entry)
+      : `No inspection data is available for temp:${thread.name}.`;
+    await ctx.ui.editor(`Switchyard Inspect \u00b7 temp:${thread.name} (read-only; edits are discarded)`, report);
+  }
+
+  /**
+   * `/switchyard threads`: a bounded/filterable list of this branch's active temp threads
+   * (name, incumbent tier/model, estimated context/turns), with inspect/rename/retire/
+   * summarize/promote actions. TUI-only; other modes have no dialog surface for it.
+   */
+  async function manageThreads(ctx: ExtensionCommandContext): Promise<void> {
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify("/switchyard threads requires interactive TUI mode", "error");
+      return;
+    }
+    while (true) {
+      const branch = ctx.sessionManager.getBranch();
+      const rows = buildThreadSummaryRows(branch, [...threads.values()]);
+      if (rows.length === 0) {
+        ctx.ui.notify("No active temp threads on this branch", "info");
+        return;
+      }
+      const selectedId = await showPicker(ctx, "Switchyard active temp threads", buildThreadSelectItems(rows), {
+        searchable: true,
+        maxVisible: 10,
+        description: "Type to filter by name. Choose a thread to inspect, rename, retire, summarize, or promote it.",
+      });
+      if (!selectedId) return;
+      const thread = threads.get(selectedId);
+      if (!thread) {
+        ctx.ui.notify("That temp thread is no longer active", "warning");
+        continue;
+      }
+      const action = await showPicker(
+        ctx,
+        `temp:${thread.name}`,
+        THREAD_ACTION_ITEMS,
+        { maxVisible: 6 },
+      ) as ThreadManagementAction | undefined;
+      if (!action) continue;
+      if (action === "inspect") await inspectThreadAction(ctx, thread);
+      else if (action === "rename") await renameThreadAction(ctx, thread);
+      else if (action === "retire") await retireThreadAction(ctx, thread);
+      else if (action === "summarize") await summarizeThreadIntoOriginAction(ctx, thread);
+      else if (action === "promote") {
+        await promoteThreadExplicit(ctx, thread);
+        return;
+      }
+    }
+  }
+
   pi.registerTool({
     name: ORIGIN_CONTEXT_TOOL,
     label: "Get Context From Origin",
@@ -987,6 +1283,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     },
     inspect,
     usage,
+    manageThreads,
     promotePending,
     getCurrentThread: () => currentLogicalThread(),
     getManualOverrideSummary: () => overrideStatusText(),
@@ -1007,11 +1304,17 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
         : "";
       ctx.ui.notify(`Recovered a message from an interrupted temp-thread lifecycle action.${imageNote}`, "warning");
     } else if (recoverablePromotion && ctx.hasUI) {
-      ctx.ui.setEditorText(recoverablePromotion.prompt);
-      const imageNote = recoverablePromotion.imageCount > 0
-        ? ` Reattach ${recoverablePromotion.imageCount} image(s) before resubmitting.`
-        : "";
-      ctx.ui.notify(`Recovered a message from an interrupted temp-thread promotion.${imageNote}`, "warning");
+      // Explicit `/switchyard threads` promotions carry no pending prompt (pendingPrompt is ""),
+      // since the user is not resubmitting a held message; only note the recovered thread itself.
+      if (recoverablePromotion.prompt) {
+        ctx.ui.setEditorText(recoverablePromotion.prompt);
+        const imageNote = recoverablePromotion.imageCount > 0
+          ? ` Reattach ${recoverablePromotion.imageCount} image(s) before resubmitting.`
+          : "";
+        ctx.ui.notify(`Recovered a message from an interrupted temp-thread promotion.${imageNote}`, "warning");
+      } else {
+        ctx.ui.notify(`Recovered temp:${recoverablePromotion.thread.name} from an interrupted promotion.`, "warning");
+      }
     } else if (forcePromotedPrompt && ctx.hasUI) {
       ctx.ui.setEditorText(forcePromotedPrompt.prompt);
       const imageNote = forcePromotedPrompt.imageCount > 0
@@ -1347,16 +1650,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
           },
         },
       });
-      const handoffPersisted = ctx.sessionManager.getBranch().some((entry) =>
-        entry.type === "custom_message"
-        && entry.customType === "switchyard-handoff"
-        && entry.details
-        && typeof entry.details === "object"
-        && (entry.details as Record<string, unknown>).switchyardHandoff
-        && typeof (entry.details as Record<string, unknown>).switchyardHandoff === "object"
-        && ((entry.details as Record<string, unknown>).switchyardHandoff as Record<string, unknown>).operationId
-          === handoffOperationId);
-      if (!handoffPersisted) {
+      if (!isSwitchyardHandoffPersisted(ctx.sessionManager.getBranch(), handoffOperationId)) {
         throw new Error("The origin handoff could not be persisted");
       }
       pi.appendEntry(SWITCHYARD_ENTRY_TYPE, {

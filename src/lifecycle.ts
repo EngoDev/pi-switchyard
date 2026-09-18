@@ -50,6 +50,30 @@ export interface TempThreadBudget {
   exceeded: boolean;
 }
 
+export interface TempThreadStats {
+  /** Compaction-aware estimated context tokens for this thread, with no pending prompt added. */
+  tokens: number;
+  /** Completed user turns tagged to this thread. */
+  turns: number;
+}
+
+/**
+ * Compaction-aware context/turn estimate for a temp thread as it stands right now, with no
+ * hypothetical pending prompt added. Shared by the bounded-lifecycle budget check and by
+ * `/switchyard threads`' read-only list, so both report the same numbers for the same thread.
+ */
+export function estimateTempThreadStats(
+  entries: readonly SessionEntry[],
+  thread: TempThread,
+): TempThreadStats {
+  const context = threadContextFromEntries(entries, thread);
+  const tokens = context.reduce((total, message) => total + estimateTokens(message), 0);
+  const turns = messagesFromEntries(entries).filter(
+    (message) => message.role === "user" && getRouterMetadata(message)?.threadId === thread.id,
+  ).length;
+  return { tokens, turns };
+}
+
 export function projectTempThreadBudget(
   entries: readonly SessionEntry[],
   thread: TempThread,
@@ -57,7 +81,7 @@ export function projectTempThreadBudget(
   images: readonly ImageContent[] | undefined,
   config: RouterConfig,
 ): TempThreadBudget {
-  const context = threadContextFromEntries(entries, thread);
+  const stats = estimateTempThreadStats(entries, thread);
   const pending: AgentMessage = {
     role: "user",
     content: [
@@ -66,10 +90,8 @@ export function projectTempThreadBudget(
     ],
     timestamp: Date.now(),
   };
-  const tokens = [...context, pending].reduce((total, message) => total + estimateTokens(message), 0);
-  const turns = messagesFromEntries(entries).filter(
-    (message) => message.role === "user" && getRouterMetadata(message)?.threadId === thread.id,
-  ).length + 1;
+  const tokens = stats.tokens + estimateTokens(pending);
+  const turns = stats.turns + 1;
   const tokenLimitExceeded = config.tempThreadSoftTokenLimit > 0
     && tokens >= config.tempThreadSoftTokenLimit;
   const turnLimitExceeded = config.tempThreadSoftTurnLimit > 0
@@ -93,4 +115,23 @@ export function formatTempThreadHandoff(thread: TempThread, summary: string): st
     summary.trim(),
     "</summary>",
   ].join("\n");
+}
+
+/**
+ * Confirms a `switchyard-handoff` custom message was actually appended to the branch under the
+ * given operation id before its source temp thread is retired. Both the automatic (budget-driven)
+ * and explicit (`/switchyard threads`) summarize-into-origin flows must verify this before
+ * retiring their thread, so a failed/partial append never silently drops the thread's work.
+ */
+export function isSwitchyardHandoffPersisted(
+  entries: readonly SessionEntry[],
+  operationId: string,
+): boolean {
+  return entries.some((entry) => {
+    if (entry.type !== "custom_message" || entry.customType !== "switchyard-handoff") return false;
+    if (!entry.details || typeof entry.details !== "object") return false;
+    const handoff = (entry.details as Record<string, unknown>).switchyardHandoff;
+    if (!handoff || typeof handoff !== "object") return false;
+    return (handoff as Record<string, unknown>).operationId === operationId;
+  });
 }
