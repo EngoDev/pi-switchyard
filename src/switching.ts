@@ -46,7 +46,9 @@ export type ModelSwitchReason =
   | "shadow-downgrade"
   | "no-effective-downgrade"
   | "dominated-economics"
-  | "in-flight-task-lock";
+  | "in-flight-task-lock"
+  | "manual-override-next"
+  | "manual-override-thread-pin";
 
 export interface SwitchEconomics {
   contextTokens: number;
@@ -750,6 +752,10 @@ export function formatMinimalSwitchDecision(
   const prefix = `Switchyard · ${thread}${resetLabel}`;
   const current = decision.incumbent ? shortModel(decision.incumbent) : undefined;
   const selected = shortModel(decision.selected);
+  if (decision.reason === "manual-override-next" || decision.reason === "manual-override-thread-pin") {
+    const label = decision.reason === "manual-override-next" ? "manual pin (next request)" : "manual pin (thread)";
+    return current ? `${prefix} · ${current} → ${selected} · ${label}` : `${prefix} · selected ${selected} · ${label}`;
+  }
   if (!current) return `${prefix} · selected ${selected} · new thread`;
   if (decision.reason === "same-model") {
     return `${prefix} · ${requested.model.id} ${decision.incumbent!.tierConfig.thinking} → ${decision.selected.tierConfig.thinking} · same model`;
@@ -866,6 +872,8 @@ export function formatVerboseSwitchDecision(
     lines.push("", "cache economics bypassed for capability upgrade");
   } else if (decision.reason === "same-model") {
     lines.push("", `thinking: ${decision.incumbent?.tierConfig.thinking ?? "unknown"} → ${decision.selected.tierConfig.thinking}`, "no model-cache switch required");
+  } else if (decision.reason === "manual-override-next" || decision.reason === "manual-override-thread-pin") {
+    lines.push("", "cache economics bypassed for a manual pin");
   } else if (decision.reason.startsWith("unknown-economics")) {
     lines.push("", "pricing metadata is unavailable for one or both models");
   }

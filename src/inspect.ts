@@ -138,12 +138,16 @@ export interface ThreadInspection {
   resetOpportunity?: { reason: "compaction" | "branch-summary" };
   recentRoutes: RecentRouteSummary[];
   latestAudit?: TransitionAudit;
+  /** Manual tier pin for this specific logical thread, persisted branch-locally until unpinned. */
+  pinnedTier?: TierName;
 }
 
 export interface InspectSnapshot {
   generatedAt: string;
   threads: ThreadInspection[];
   pricing: ModelPricingSnapshot[];
+  /** Pending one-shot override for the next accepted provider-bound request, if any. */
+  nextOverride?: { target?: "origin"; tier?: TierName };
 }
 
 function formatTokens(tokens: number): string {
@@ -208,6 +212,7 @@ function formatAudit(audit: TransitionAudit): string[] {
 
 function formatThread(thread: ThreadInspection): string[] {
   const lines = [`${thread.active ? "●" : "○"} ${thread.name}${thread.active ? " [active]" : ""}`];
+  if (thread.pinnedTier) lines.push(`  manual pin: ${thread.pinnedTier} (persists until /switchyard unpin)`);
   lines.push(
     thread.incumbent
       ? `  incumbent: ${thread.incumbent.tier} · ${thread.incumbent.provider}/${thread.incumbent.modelId} · thinking: ${thread.incumbent.thinking}`
@@ -263,8 +268,22 @@ function formatPricing(entry: ModelPricingSnapshot): string[] {
   return lines;
 }
 
+function formatNextOverride(next: { target?: "origin"; tier?: TierName }): string {
+  const parts = [
+    next.target ? `target → ${next.target}` : undefined,
+    next.tier ? `tier → ${next.tier}` : undefined,
+  ].filter((part): part is string => part !== undefined);
+  return parts.length > 0 ? parts.join(", ") : "(empty)";
+}
+
 export function formatInspectReport(snapshot: InspectSnapshot): string {
   const lines = [`Switchyard Inspect · ${snapshot.generatedAt}`, ""];
+  lines.push(
+    snapshot.nextOverride
+      ? `Pending next-request override: ${formatNextOverride(snapshot.nextOverride)}`
+      : "Pending next-request override: none",
+    "",
+  );
   lines.push(`Threads (${snapshot.threads.length}):`);
   for (const thread of snapshot.threads) {
     lines.push(...formatThread(thread), "");

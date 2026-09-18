@@ -39,6 +39,20 @@ import {
 import { isConfigured, loadConfig } from "./config.js";
 import { registerConfigurationCommand } from "./configuration-ui.js";
 import {
+  applyTargetOverride,
+  applyTierOverride,
+  formatManualOverrideStatus,
+  mergeNextOverride,
+  NEXT_OVERRIDE_ENTRY_TYPE,
+  PIN_ENTRY_TYPE,
+  registerNextOverrideDispatch,
+  restoreNextOverride,
+  restoreThreadPins,
+  type NextOverrideEntryData,
+  type PendingNextOverride,
+  type PinEntryData,
+} from "./overrides.js";
+import {
   ensurePromotionMessagesDurable,
   fingerprintImages,
   formatTempThreadHandoff,
@@ -433,8 +447,19 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   let runtimeInvalidated = false;
   let originFallbackForNext = false;
   let routeMetadataPersisted = false;
+  let threadPins = new Map<string, TierName>();
+  let pendingNextOverride: PendingNextOverride | undefined;
+  let appliedNextOverrideToken: string | undefined;
 
   registerCacheResetDispatch(pi, () => activeRoute?.threadId ?? (originFallbackForNext ? "origin" : undefined));
+  registerNextOverrideDispatch(
+    pi,
+    () => appliedNextOverrideToken,
+    (token) => {
+      if (pendingNextOverride?.token === token) pendingNextOverride = undefined;
+      appliedNextOverrideToken = undefined;
+    },
+  );
 
   function setOriginContextToolEnabled(enabled: boolean): void {
     const active = pi.getActiveTools();
@@ -444,7 +469,8 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
   }
 
   function clearDebugStatus(ctx: ExtensionContext): void {
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    const overrideText = overrideStatusText();
+    ctx.ui.setStatus(STATUS_KEY, overrideText ? ctx.ui.theme.fg("accent", overrideText) : undefined);
   }
 
   function restoreBranchState(ctx: ExtensionContext): void {
@@ -462,6 +488,21 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     pendingPromotedToConsume = undefined;
     originFallbackForNext = false;
     routeMetadataPersisted = false;
+    threadPins = restoreThreadPins(branch);
+    pendingNextOverride = restoreNextOverride(branch);
+    appliedNextOverrideToken = undefined;
+  }
+
+  function currentLogicalThread(): { id: string; name: string } {
+    const route = activeRoute ?? lastVisibleRoute;
+    if (!route) return { id: "origin", name: "origin" };
+    return { id: route.threadId, name: route.threadId === "origin" ? "origin" : route.threadName };
+  }
+
+  function overrideStatusText(): string | undefined {
+    const current = currentLogicalThread();
+    const threadLabel = current.id === "origin" ? "origin" : `temp:${current.name}`;
+    return formatManualOverrideStatus(threadPins.get(current.id), threadLabel, pendingNextOverride);
   }
 
   function ensureTempTreeLabels(ctx: ExtensionContext): void {
@@ -477,7 +518,94 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       clearDebugStatus(ctx);
       return;
     }
-    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", formatRouteStatus(route, pi.getThinkingLevel())));
+    const base = formatRouteStatus(route, pi.getThinkingLevel());
+    const overrideText = overrideStatusText();
+    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", overrideText ? `${base} · ${overrideText}` : base));
+  }
+
+  function refreshOverrideStatus(ctx: ExtensionContext): void {
+    if (config.debug !== "off" && routeClient && lastVisibleRoute) showDebugStatus(ctx, lastVisibleRoute);
+    else clearDebugStatus(ctx);
+  }
+
+  function pinTier(ctx: ExtensionCommandContext, tier: TierName, scope: "thread" | "next"): void {
+    if (scope === "thread") {
+      const current = currentLogicalThread();
+      threadPins.set(current.id, tier);
+      pi.appendEntry(PIN_ENTRY_TYPE, {
+        kind: "set",
+        threadId: current.id,
+        threadName: current.name,
+        tier,
+        timestamp: new Date().toISOString(),
+      } satisfies PinEntryData);
+      refreshOverrideStatus(ctx);
+      ctx.ui.notify(
+        `Pinned ${tier} for ${current.id === "origin" ? "origin" : `temp:${current.name}`}`,
+        "info",
+      );
+      return;
+    }
+    pendingNextOverride = mergeNextOverride(
+      pendingNextOverride,
+      { tier },
+      pendingNextOverride?.token ?? uuidv7(),
+    );
+    pi.appendEntry(NEXT_OVERRIDE_ENTRY_TYPE, {
+      kind: "set",
+      token: pendingNextOverride.token,
+      ...(pendingNextOverride.target ? { target: pendingNextOverride.target } : {}),
+      ...(pendingNextOverride.tier ? { tier: pendingNextOverride.tier } : {}),
+      timestamp: new Date().toISOString(),
+    } satisfies NextOverrideEntryData);
+    refreshOverrideStatus(ctx);
+    ctx.ui.notify(`Pinned ${tier} for the next request`, "info");
+  }
+
+  function unpin(ctx: ExtensionCommandContext): void {
+    const current = currentLogicalThread();
+    let cleared = false;
+    if (threadPins.has(current.id)) {
+      threadPins.delete(current.id);
+      pi.appendEntry(PIN_ENTRY_TYPE, {
+        kind: "cleared",
+        threadId: current.id,
+        timestamp: new Date().toISOString(),
+      } satisfies PinEntryData);
+      cleared = true;
+    }
+    if (pendingNextOverride) {
+      pi.appendEntry(NEXT_OVERRIDE_ENTRY_TYPE, {
+        kind: "resolved",
+        token: pendingNextOverride.token,
+        outcome: "cleared",
+        timestamp: new Date().toISOString(),
+      } satisfies NextOverrideEntryData);
+      pendingNextOverride = undefined;
+      cleared = true;
+    }
+    refreshOverrideStatus(ctx);
+    ctx.ui.notify(
+      cleared ? "Cleared the active Switchyard pin(s)" : "No Switchyard pin was active",
+      cleared ? "info" : "warning",
+    );
+  }
+
+  function routeOrigin(ctx: ExtensionCommandContext): void {
+    pendingNextOverride = mergeNextOverride(
+      pendingNextOverride,
+      { target: "origin" },
+      pendingNextOverride?.token ?? uuidv7(),
+    );
+    pi.appendEntry(NEXT_OVERRIDE_ENTRY_TYPE, {
+      kind: "set",
+      token: pendingNextOverride.token,
+      ...(pendingNextOverride.target ? { target: pendingNextOverride.target } : {}),
+      ...(pendingNextOverride.tier ? { tier: pendingNextOverride.tier } : {}),
+      timestamp: new Date().toISOString(),
+    } satisfies NextOverrideEntryData);
+    refreshOverrideStatus(ctx);
+    ctx.ui.notify("The next request will route to origin", "info");
   }
 
   function invalidateLifecycle(): void {
@@ -764,6 +892,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       const reset = getCacheResetOpportunity(branch, id);
       const messages = threadMessagesForSwitching(ctx, id, thread);
       const contextTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+      const pinnedTier = threadPins.get(id);
       return {
         id,
         name,
@@ -783,6 +912,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
         ...(reset ? { resetOpportunity: { reason: reset.reason } } : {}),
         recentRoutes: summarizeRouteHistory(routeHistory),
         ...(routeHistory.at(-1)?.audit ? { latestAudit: routeHistory.at(-1)!.audit } : {}),
+        ...(pinnedTier ? { pinnedTier } : {}),
       };
     });
     const pricing = TIER_NAMES.flatMap((tier) => {
@@ -798,6 +928,14 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       generatedAt: new Date().toISOString(),
       threads: inspectedThreads,
       pricing,
+      ...(pendingNextOverride
+        ? {
+            nextOverride: {
+              ...(pendingNextOverride.target ? { target: pendingNextOverride.target } : {}),
+              ...(pendingNextOverride.tier ? { tier: pendingNextOverride.tier } : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -824,6 +962,11 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     },
     inspect,
     promotePending,
+    getCurrentThread: () => currentLogicalThread(),
+    getManualOverrideSummary: () => overrideStatusText(),
+    pinTier,
+    unpin,
+    routeOrigin,
   });
 
   pi.on("session_start", (_event, ctx) => {
@@ -1058,6 +1201,10 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
       restoreHeldPromptIfCurrent(identity, event, ctx);
       return { action: "handled" as const };
     }
+    if (decision) {
+      const targetOverride = applyTargetOverride(decision.target, pendingNextOverride);
+      if (targetOverride.overridden) decision = { ...decision, target: targetOverride.target };
+    }
     pendingRouteDecision = {
       requestId: uuidv7(),
       prompt: event.text,
@@ -1226,6 +1373,7 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     pendingRoutePrompt = undefined;
     pendingTransitionAudit = undefined;
     routeMetadataPersisted = false;
+    appliedNextOverrideToken = undefined;
 
     if (!routeClient || !config.enabled || !isConfigured(config)) {
       clearDebugStatus(ctx);
@@ -1255,14 +1403,56 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     }
     if (decision && forceOrigin) decision = { ...decision, target: "origin" };
 
+    if (decision) {
+      const targetOverride = applyTargetOverride(decision.target, pendingNextOverride);
+      if (targetOverride.overridden) {
+        decision = { ...decision, target: targetOverride.target };
+        appliedNextOverrideToken = pendingNextOverride?.token;
+      }
+    }
+
     // Jev unavailable, timed out, or returned an unusable answer: Pi proceeds untouched.
     if (!decision) {
       clearDebugStatus(ctx);
       return;
     }
 
-    const resolved = resolveTierModel(ctx, config, decision.tier, hasImages);
+    // Manual target/tier overrides are applied before model resolution and the deterministic
+    // transition policy: a next-request override beats a thread pin, which beats Jev's tier.
+    // The provisional thread id equals decision.target for origin/existing temps; a brand-new
+    // temp thread has no id yet and therefore cannot already carry a pin.
+    const provisionalThreadId = decision.target === "new_temp_from_origin" ? undefined : decision.target;
+    let tierOverride = applyTierOverride(decision.tier, provisionalThreadId, pendingNextOverride, threadPins);
+    if (tierOverride.source === "next-override") appliedNextOverrideToken = pendingNextOverride?.token;
+
+    let resolved = resolveTierModel(ctx, config, tierOverride.tier, hasImages);
+    if (!resolved && tierOverride.source !== "jev") {
+      if (tierOverride.source === "thread-pin" && provisionalThreadId) {
+        threadPins.delete(provisionalThreadId);
+        pi.appendEntry(PIN_ENTRY_TYPE, {
+          kind: "cleared",
+          threadId: provisionalThreadId,
+          timestamp: new Date().toISOString(),
+        } satisfies PinEntryData);
+        ctx.ui.notify(`Cleared invalid ${tierOverride.tier} pin; using Jev's tier for this request`, "warning");
+      } else {
+        ctx.ui.notify(`The next-request ${tierOverride.tier} pin is unavailable; using Jev's tier while preserving its target override`, "warning");
+      }
+      tierOverride = { tier: decision.tier, source: "jev" };
+      resolved = resolveTierModel(ctx, config, decision.tier, hasImages);
+    }
     if (!resolved) {
+      if (pendingNextOverride && appliedNextOverrideToken === pendingNextOverride.token) {
+        pi.appendEntry(NEXT_OVERRIDE_ENTRY_TYPE, {
+          kind: "resolved",
+          token: pendingNextOverride.token,
+          outcome: "cleared",
+          timestamp: new Date().toISOString(),
+        } satisfies NextOverrideEntryData);
+        pendingNextOverride = undefined;
+        appliedNextOverrideToken = undefined;
+        ctx.ui.notify("Cleared an unusable next-request override because no valid fallback model was available", "warning");
+      }
       clearDebugStatus(ctx);
       return;
     }
@@ -1308,18 +1498,30 @@ export default function switchyardExtension(pi: ExtensionAPI): void {
     const providerOverheadTokens = Math.ceil(
       (event.systemPrompt.length + JSON.stringify(providerVisibleTools).length) / 4,
     );
-    const switchDecision = evaluateThreadModelSwitch(
-      ctx,
-      targetThreadId,
-      targetThread,
-      candidate,
-      transitionCandidates,
-      currentRecommendation,
-      event.prompt,
-      event.images?.length ?? 0,
-      providerOverheadTokens,
-      config,
-    );
+    const manualTierOverrideActive = tierOverride.source !== "jev";
+    const manualOverrideIncumbent = manualTierOverrideActive
+      ? resolveThreadIncumbent(ctx, targetThreadId, hasImages)
+      : undefined;
+    const switchDecision: ModelTransitionDecision = manualTierOverrideActive
+      ? {
+          selection: "candidate",
+          selected: candidate,
+          requested: candidate,
+          ...(manualOverrideIncumbent ? { incumbent: manualOverrideIncumbent } : {}),
+          reason: tierOverride.source === "next-override" ? "manual-override-next" : "manual-override-thread-pin",
+        }
+      : evaluateThreadModelSwitch(
+          ctx,
+          targetThreadId,
+          targetThread,
+          candidate,
+          transitionCandidates,
+          currentRecommendation,
+          event.prompt,
+          event.images?.length ?? 0,
+          providerOverheadTokens,
+          config,
+        );
     const selectedModel = switchDecision.selected;
 
     const modelSet = await pi.setModel(selectedModel.model);

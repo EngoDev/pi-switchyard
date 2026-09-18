@@ -47,7 +47,7 @@ function availableModels(ctx: ExtensionCommandContext): Model<any>[] {
   );
 }
 
-export function buildCategoryItems(config: RouterConfig): SelectItem[] {
+export function buildCategoryItems(config: RouterConfig, manualOverrideSummary?: string): SelectItem[] {
   const tierItems: SelectItem[] = TIER_NAMES.map((tier) => {
     const current = config.tiers[tier];
     return {
@@ -60,6 +60,11 @@ export function buildCategoryItems(config: RouterConfig): SelectItem[] {
   });
   return [
     ...tierItems,
+    {
+      value: "pin",
+      label: "manual pin",
+      description: manualOverrideSummary ?? "none active",
+    },
     {
       value: "debug",
       label: "debug",
@@ -148,6 +153,13 @@ export interface ConfigurationHooks {
   onDebugChanged(ctx: ExtensionCommandContext): void;
   inspect?(ctx: ExtensionCommandContext): Promise<void>;
   promotePending?(ctx: ExtensionCommandContext, token: string): Promise<void>;
+  /** The logical thread a bare `/switchyard pin <tier>` or interactive "current logical thread" scope applies to. */
+  getCurrentThread?(): { id: string; name: string };
+  /** Compact summary of any active pin/next override, shown in the configuration menu. */
+  getManualOverrideSummary?(): string | undefined;
+  pinTier?(ctx: ExtensionCommandContext, tier: TierName, scope: "thread" | "next"): void;
+  unpin?(ctx: ExtensionCommandContext): void;
+  routeOrigin?(ctx: ExtensionCommandContext): void;
 }
 
 async function chooseScope(ctx: ExtensionCommandContext, title: string): Promise<ConfigScope | undefined> {
@@ -412,6 +424,38 @@ async function editSwitching(ctx: ExtensionCommandContext, hooks: ConfigurationH
   );
 }
 
+/**
+ * `/switchyard pin` (interactive): choose a tier, then choose whether it applies
+ * once to the next request or persists for the current logical thread until
+ * unpinned. `/switchyard pin <tier>` (direct) skips both pickers and pins the
+ * current logical thread immediately.
+ */
+async function handlePinCommand(
+  ctx: ExtensionCommandContext,
+  hooks: ConfigurationHooks,
+  presetTier?: TierName,
+): Promise<void> {
+  if (presetTier) {
+    hooks.pinTier?.(ctx, presetTier, "thread");
+    return;
+  }
+  const tier = await showPicker(
+    ctx,
+    "Pin tier",
+    TIER_NAMES.map((name) => ({ value: name, label: name })),
+    { maxVisible: 5 },
+  ) as TierName | undefined;
+  if (!tier) return;
+  const current = hooks.getCurrentThread?.() ?? { id: "origin", name: "origin" };
+  const threadLabel = current.id === "origin" ? "origin" : `temp:${current.name}`;
+  const scope = await showPicker(ctx, `Pin ${tier}: choose scope`, [
+    { value: "next", label: "next request", description: "Applies once, then clears automatically" },
+    { value: "thread", label: "current logical thread", description: threadLabel },
+  ], { maxVisible: 4 });
+  if (!scope) return;
+  hooks.pinTier?.(ctx, tier, scope as "thread" | "next");
+}
+
 async function editEnabled(ctx: ExtensionCommandContext, hooks: ConfigurationHooks): Promise<void> {
   const selected = await showPicker(ctx, "Enable Switchyard", [
     { value: "true", label: "enabled" },
@@ -449,12 +493,14 @@ async function showCategoryMenu(ctx: ExtensionCommandContext, hooks: Configurati
     () => showPicker(
       ctx,
       "Choose Switchyard category to change",
-      buildCategoryItems(hooks.getConfig()),
-      { maxVisible: 11 },
+      buildCategoryItems(hooks.getConfig(), hooks.getManualOverrideSummary?.()),
+      { maxVisible: 12 },
     ),
     async (selected) => {
       if (selected.startsWith("tier:")) {
         await editTier(ctx, hooks, selected.slice("tier:".length) as TierName);
+      } else if (selected === "pin") {
+        await handlePinCommand(ctx, hooks);
       } else if (selected === "debug") {
         await editDebug(ctx, hooks);
       } else if (selected === "enabled") {
@@ -495,8 +541,33 @@ export function registerConfigurationCommand(pi: ExtensionAPI, hooks: Configurat
         await hooks.inspect?.(ctx);
       } else if (direct === "show") {
         ctx.ui.notify(formatConfig(hooks.getConfig()), "info");
+      } else if (direct === "pin" || direct.startsWith("pin ")) {
+        const arg = direct === "pin" ? "" : direct.slice("pin ".length).trim();
+        if (!arg) {
+          await handlePinCommand(ctx, hooks);
+        } else if ((TIER_NAMES as readonly string[]).includes(arg)) {
+          await handlePinCommand(ctx, hooks, arg as TierName);
+        } else {
+          ctx.ui.notify("Usage: /switchyard pin [genius|smart|handy|cheap]", "error");
+        }
+      } else if (direct.startsWith("pin-next")) {
+        const arg = direct.slice("pin-next".length).trim();
+        if ((TIER_NAMES as readonly string[]).includes(arg)) {
+          hooks.pinTier?.(ctx, arg as TierName, "next");
+        } else {
+          ctx.ui.notify("Usage: /switchyard pin-next <genius|smart|handy|cheap>", "error");
+        }
+      } else if (direct === "unpin") {
+        hooks.unpin?.(ctx);
+      } else if (direct.startsWith("route")) {
+        const arg = direct.slice("route".length).trim();
+        if (arg === "origin") {
+          hooks.routeOrigin?.(ctx);
+        } else {
+          ctx.ui.notify("Usage: /switchyard route origin", "error");
+        }
       } else {
-        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|debug|limits|switching|inspect|on|off|show]", "error");
+        ctx.ui.notify("Usage: /switchyard [genius|smart|handy|cheap|pin|pin-next|unpin|route|debug|limits|switching|inspect|on|off|show]", "error");
       }
     },
   });

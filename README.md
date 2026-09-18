@@ -190,6 +190,11 @@ Direct command forms:
 /switchyard limits
 /switchyard switching
 /switchyard inspect
+/switchyard pin
+/switchyard pin smart
+/switchyard pin-next cheap
+/switchyard route origin
+/switchyard unpin
 /switchyard on
 /switchyard off
 ```
@@ -212,6 +217,28 @@ Run `/switchyard inspect` for an on-demand, read-only snapshot without enabling 
 - Configured tier pricing, its provenance (`pi-metadata`, `switchyard-override`, or `unknown`), and long-context tiers
 
 New routes persist a compact model-free audit record; old route entries remain readable, show less detail, and label their requested tier as a legacy decision rather than implying audit-level provenance. In TUI mode the report opens in an editor-style read-only view whose edits are discarded. Other modes emit the report through Pi's notification channel.
+
+### Manual routing overrides
+
+Use explicit overrides when you know more than the router:
+
+```text
+/switchyard pin
+/switchyard pin smart
+/switchyard pin-next cheap
+/switchyard route origin
+/switchyard unpin
+```
+
+- Bare `pin` interactively chooses a tier and either the current logical thread or the next request.
+- `pin <tier>` pins the current origin/temp thread until `unpin`.
+- `pin-next <tier>` affects one provider-bound request only.
+- `route origin` forces only the next request's target while leaving its tier to Jev, unless combined with `pin-next`.
+- A next target and tier merge under one stable token; the first provider dispatch consumes them even if it fails or retries. A request cancelled before dispatch leaves them pending.
+- A thread pin is branch-local and follows only that thread. Invalid pins caused by model/config drift are visibly cleared and fall back to Jev rather than silently blocking requests.
+- Manual tiers bypass economic hysteresis but still require a configured, authenticated, image-capable model. Active overrides remain visible in the footer even when debug mode is off and appear in `/switchyard inspect`.
+
+Precedence is: next-request tier override, current-thread pin, then Jev and the deterministic transition policy.
 
 ### Debug mode
 
