@@ -27,7 +27,10 @@ function run(command, args, options = {}) {
 
 try {
   await mkdir(packDir, { recursive: true });
-  run("npm", ["pack", "--ignore-scripts", "--pack-destination", packDir]);
+  // npm publish --dry-run exports npm_config_dry_run to lifecycle children.
+  // These temporary local operations must create real files to validate the artifact.
+  // Override only pack/install; never alter the parent publish's dry-run setting.
+  run("npm", ["pack", "--ignore-scripts", "--dry-run=false", "--pack-destination", packDir]);
 
   const tarballs = (await readdir(packDir)).filter((entry) => entry.endsWith(".tgz"));
   if (tarballs.length !== 1) {
@@ -38,6 +41,7 @@ try {
   run("npm", [
     "install",
     "--ignore-scripts",
+    "--dry-run=false",
     "--omit=dev",
     "--legacy-peer-deps",
     "--no-package-lock",
